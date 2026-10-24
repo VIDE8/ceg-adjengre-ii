@@ -1,4 +1,4 @@
-# 🏫 Système de Gestion Scolaire - C.S. "L'AVENIR D'OR"
+# 🏫 Système de Gestion Scolaire - CEG ADJENGRE II
 
 Application web full-stack de gestion administrative, pédagogique et financière développée avec **Laravel 11**, **Blade**, **Bootstrap 5** et **Vite**.
 
