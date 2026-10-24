@@ -1,83 +1,46 @@
-<?php
+# ---------- 1) Compilation des fichiers CSS / JavaScript (Vite) ----------
+FROM node:22-alpine AS assets
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
 
-namespace Database\Seeders;
+# ---------- 2) Application Laravel (PHP 8.3 + Apache) ----------
+FROM php:8.3-apache
 
-use Illuminate\Database\Seeder;
-use Illuminate\Support\Facades\Hash;
-use App\Models\User;
-use App\Models\Matiere;
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git unzip libzip-dev \
+    && docker-php-ext-install pdo_mysql bcmath zip \
+    && a2enmod rewrite headers \
+    && rm -rf /var/lib/apt/lists/*
 
-class DatabaseSeeder extends Seeder
-{
-    public function run(): void
-    {
-        // EN PRODUCTION : seulement le compte du directeur et les matières, et seulement si la
-        // base est vide. Aucun compte de test, aucun mot de passe « password ».
-        if (app()->environment('production')) {
-            if (User::count() > 0) {
-                return;
-            }
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
-            $email = env('ADMIN_EMAIL');
-            $motDePasse = env('ADMIN_PASSWORD');
+# Apache sert le dossier public/ de Laravel et lit les règles du fichier .htaccess
+ENV APACHE_DOCUMENT_ROOT=/var/www/html/public
+RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf \
+    && printf '<Directory /var/www/html/public>\n    AllowOverride All\n    Require all granted\n</Directory>\n' > /etc/apache2/conf-available/laravel.conf \
+    && a2enconf laravel
 
-            if (!$email || !$motDePasse) {
-                throw new \RuntimeException('Définis les variables ADMIN_EMAIL et ADMIN_PASSWORD pour créer le compte du directeur.');
-            }
+WORKDIR /var/www/html
 
-            User::create([
-                'name' => env('ADMIN_NAME', 'Directeur'),
-                'email' => $email,
-                'password' => Hash::make($motDePasse),
-                'role' => 'admin',
-                'actif' => true,
-                'doit_changer_mot_de_passe' => true, // il choisit son propre mot de passe à la première connexion
-            ]);
+# Dépendances PHP (mises en cache tant que composer.lock ne change pas)
+COPY composer.json composer.lock ./
+RUN composer install --no-dev --no-interaction --no-scripts --prefer-dist --optimize-autoloader
 
-            $this->creerMatieres();
+# Code de l'application, puis fichiers compilés à l'étape 1
+COPY . .
+COPY --from=assets /app/public/build ./public/build
 
-            return;
-        }
+RUN composer dump-autoload --optimize --no-dev \
+    && mkdir -p storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs bootstrap/cache \
+    && (php artisan package:discover --ansi || true) \
+    && chown -R www-data:www-data storage bootstrap/cache \
+    && chmod -R ug+rwx storage bootstrap/cache
 
-        // EN DÉVELOPPEMENT (ton ordinateur) : comptes de test.
-        // Le script peut être relancé sans risque : il ne crée que ce qui manque.
-        User::firstOrCreate(
-            ['email' => 'admin@ecole.tg'],
-            ['name' => 'Admin Directeur', 'password' => Hash::make('password'), 'role' => 'admin']
-        );
+COPY docker/start.sh /usr/local/bin/start.sh
+RUN sed -i 's/\r$//' /usr/local/bin/start.sh && chmod +x /usr/local/bin/start.sh
 
-        User::firstOrCreate(
-            ['email' => 'comptable@ecole.tg'],
-            ['name' => 'Comptable École', 'password' => Hash::make('password'), 'role' => 'comptable']
-        );
-
-        for ($i = 1; $i <= 9; $i++) {
-            User::firstOrCreate(
-                ['email' => "professeur{$i}@ecole.tg"],
-                ['name' => "Professeur $i", 'password' => Hash::make('password'), 'role' => 'professeur']
-            );
-        }
-
-        $this->creerMatieres();
-    }
-
-    // Matières du collège, avec leur groupe pour les moyennes « Littérature » et « Science »
-    private function creerMatieres(): void
-    {
-        $matieres = [
-            ['Français',  'FR',    'litteraire'],
-            ['Anglais',   'ANG',   'litteraire'],
-            ['Histo-Géo', 'HG',    'litteraire'],
-            ['ECM',       'ECM',   'litteraire'],
-            ['SVT',       'SVT',   'scientifique'],
-            ['Maths',     'MATHS', 'scientifique'],
-            ['PCT',       'PCT',   'scientifique'],
-            ['EPS',       'EPS',   'autre'],
-            ['Musique',   'MUS',   'autre'],
-        ];
-
-        foreach ($matieres as [$nom, $code, $groupe]) {
-            Matiere::firstOrCreate(['nom' => $nom], ['code' => $code, 'groupe' => $groupe]);
-        }
-    }
-}
+EXPOSE 10000
+CMD ["start.sh"]
