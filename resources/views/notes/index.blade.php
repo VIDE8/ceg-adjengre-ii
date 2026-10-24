@@ -1,0 +1,57 @@
+@extends('layouts.app')
+
+@section('title', 'Saisie des notes')
+
+@section('content')
+<div class="container my-4">
+    <h4 class="fw-bold mb-1">Saisie des notes</h4>
+    <p class="text-muted small mb-4">Choisis une classe et une matière pour saisir les notes de classe et la composition.</p>
+
+    @if(session('success'))
+    <div class="alert alert-success small py-2">{{ session('success') }}</div>
+    @endif
+
+    @if($affectations->isEmpty())
+    <div class="alert alert-warning">
+        Aucune matière ne vous est affectée pour le moment. Contactez l'administrateur.
+    </div>
+    @else
+    <div class="card shadow-sm border-0">
+        <div class="card-body">
+            <div class="table-responsive">
+                <table class="table table-hover align-middle mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Classe</th>
+                            <th>Matière</th>
+                            <th class="text-center">Coefficient</th>
+                            <th></th>
+                            <th class="text-end">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach($affectations as $a)
+                        <tr>
+                            <td class="fw-bold">{{ $a->classe->niveau }} {{ $a->classe->nom_classe }}</td>
+                            <td>{{ $a->matiere->nom }}</td>
+                            <td class="text-center"><span class="badge bg-secondary">{{ $a->coefficient }}</span></td>
+                            <td>
+                                @if($a->classe->professeur_id == auth()->id())
+                                <span class="badge bg-success">Professeur titulaire</span>
+                                @endif
+                            </td>
+                            <td class="text-end">
+                                <a href="{{ route('notes.saisie', ['classe_id' => $a->classe_id, 'matiere_id' => $a->matiere_id]) }}" class="btn btn-sm btn-warning fw-bold text-dark">
+                                    Saisir les notes
+                                </a>
+                            </td>
+                        </tr>
+                        @endforeach
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    @endif
+</div>
+@endsection

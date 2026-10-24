@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.env.*
+node_modules
+vendor
+public/build
+public/hot
+storage/logs
+tests
+*.sql
+*.zip
+database/database.sqlite
