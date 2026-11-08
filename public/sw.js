@@ -1,4 +1,4 @@
-const CACHE_NAME = 'avenir-dor-shell-v1';
+const CACHE_NAME = 'avenir-dor-shell-v2';
 const SHELL_ASSETS = [
   '/manifest.json',
   '/icon-192.png',
