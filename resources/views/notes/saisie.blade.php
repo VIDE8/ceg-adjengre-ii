@@ -17,11 +17,11 @@
         </div>
 
         @if($trimestres->isNotEmpty())
-        <form action="{{ route('notes.saisie') }}" method="GET" class="d-flex align-items-center gap-2">
+        <form action="{{ route('notes.saisie') }}" method="GET" id="form-trimestre" class="d-flex align-items-center gap-2">
             <input type="hidden" name="classe_id" value="{{ $affectation->classe_id }}">
             <input type="hidden" name="matiere_id" value="{{ $affectation->matiere_id }}">
             <label class="small fw-bold mb-0">Trimestre</label>
-            <select name="trimestre_id" class="form-select form-select-sm" onchange="this.form.submit()">
+            <select name="trimestre_id" id="select-trimestre" class="form-select form-select-sm">
                 @foreach($trimestres as $t)
                 <option value="{{ $t->id }}" {{ $trimestre && $trimestre->id === $t->id ? 'selected' : '' }}>
                     {{ $t->numero == 1 ? '1er' : $t->numero . 'ème' }} trimestre &ndash; {{ $t->anneeScolaire->libelle }}
@@ -53,8 +53,9 @@
     @elseif($eleves->isEmpty())
     <div class="alert alert-warning">Aucun élève dans cette classe pour le moment.</div>
     @else
-    <form action="{{ route('notes.enregistrer') }}" method="POST">
+    <form action="{{ route('notes.enregistrer') }}" method="POST" id="form-notes">
         @csrf
+        <div id="zone-message"></div>
         <input type="hidden" name="classe_id" value="{{ $affectation->classe_id }}">
         <input type="hidden" name="matiere_id" value="{{ $affectation->matiere_id }}">
         <input type="hidden" name="trimestre_id" value="{{ $trimestre->id }}">
@@ -199,6 +200,152 @@
 
             if (nb >= maxDevoirs) {
                 bouton.disabled = true;
+            }
+        });
+
+        // ---------- Mode hors ligne ----------
+        var form = document.getElementById('form-notes');
+        var selectTrim = document.getElementById('select-trimestre');
+
+        function esc(s) {
+            return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+                return {
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    '"': '&quot;',
+                    "'": '&#39;'
+                } [c];
+            });
+        }
+
+        function message(type, texte) {
+            var zone = document.getElementById('zone-message');
+            if (zone) {
+                zone.innerHTML = '<div class="alert alert-' + type + ' small py-2">' + esc(texte) + '</div>';
+                zone.scrollIntoView({
+                    block: 'nearest'
+                });
+            }
+        }
+
+        // Changer de trimestre recharge la page : impossible sans connexion
+        if (selectTrim) {
+            var trimestreInitial = selectTrim.value;
+            selectTrim.addEventListener('change', async function() {
+                var ok = await OfflineQueue.enLigne();
+                if (ok) {
+                    selectTrim.form.submit();
+                } else {
+                    selectTrim.value = trimestreInitial;
+                    message('warning', 'Changer de trimestre demande une connexion Internet.');
+                }
+            });
+        }
+
+        if (!form) {
+            return;
+        }
+
+        function lire() {
+            var d = {
+                classe_id: form.elements['classe_id'].value,
+                matiere_id: form.elements['matiere_id'].value,
+                trimestre_id: form.elements['trimestre_id'].value,
+                notes: {}
+            };
+            form.querySelectorAll('input.note-input').forEach(function(inp) {
+                var m = /^notes\[(\d+)\]\[devoir\]\[(\d+)\]$/.exec(inp.name);
+                if (m) {
+                    d.notes[m[1]] = d.notes[m[1]] || {};
+                    d.notes[m[1]].devoir = d.notes[m[1]].devoir || {};
+                    d.notes[m[1]].devoir[m[2]] = inp.value;
+                    return;
+                }
+                m = /^notes\[(\d+)\]\[composition\]$/.exec(inp.name);
+                if (m) {
+                    d.notes[m[1]] = d.notes[m[1]] || {};
+                    d.notes[m[1]].composition = inp.value;
+                }
+            });
+            return d;
+        }
+
+        function remplir(nom, valeur) {
+            var champ = form.elements[nom];
+            if (champ) {
+                champ.value = valeur == null ? '' : valeur;
+                champ.dispatchEvent(new Event('input', {
+                    bubbles: true
+                }));
+            }
+        }
+
+        // Notes saisies sans connexion et pas encore envoyées : on les remet dans la grille
+        // (la copie de la page gardée dans le téléphone peut être plus ancienne)
+        OfflineQueue.toutes().then(function(items) {
+            var attente = items.filter(function(i) {
+                return i.type === 'note' && !i.error &&
+                    String(i.payload.classe_id) === String(form.elements['classe_id'].value) &&
+                    String(i.payload.matiere_id) === String(form.elements['matiere_id'].value) &&
+                    String(i.payload.trimestre_id) === String(form.elements['trimestre_id'].value);
+            });
+            if (!attente.length) {
+                return;
+            }
+            var maxOrdre = 0;
+            attente.forEach(function(i) {
+                Object.keys(i.payload.notes || {}).forEach(function(e) {
+                    Object.keys((i.payload.notes[e] || {}).devoir || {}).forEach(function(o) {
+                        maxOrdre = Math.max(maxOrdre, parseInt(o, 10));
+                    });
+                });
+            });
+            while (nb < Math.min(maxOrdre, maxDevoirs)) {
+                bouton.click();
+            }
+            attente.forEach(function(i) {
+                Object.keys(i.payload.notes || {}).forEach(function(e) {
+                    var s = i.payload.notes[e] || {};
+                    Object.keys(s.devoir || {}).forEach(function(o) {
+                        remplir('notes[' + e + '][devoir][' + o + ']', s.devoir[o]);
+                    });
+                    if ('composition' in s) {
+                        remplir('notes[' + e + '][composition]', s.composition);
+                    }
+                });
+            });
+            message('warning', 'Des notes saisies sans connexion attendent leur envoi : elles sont affichées dans la grille.');
+        });
+
+        form.addEventListener('submit', async function(ev) {
+            ev.preventDefault();
+            var boutonEnvoi = form.querySelector('button[type=submit]');
+            var texteBouton = boutonEnvoi.textContent;
+            boutonEnvoi.disabled = true;
+            boutonEnvoi.textContent = 'Enregistrement…';
+            try {
+                var payload = lire();
+                var titre = document.querySelector('h4').textContent.replace(/\s+/g, ' ').trim();
+                var trim = selectTrim ? selectTrim.options[selectTrim.selectedIndex].text.replace(/\s+/g, ' ').trim() : '';
+                var label = 'Notes ' + titre + (trim ? ' · ' + trim : '');
+                var id = await OfflineQueue.enqueue('note', payload, label);
+                var resultats = await OfflineQueue.flush();
+                var r = resultats[id];
+
+                if (r && (r.status === 'ok' || r.status === 'duplicate')) {
+                    message('success', 'Notes enregistrées avec succès !');
+                } else if (r && r.status === 'error') {
+                    await OfflineQueue.supprimer(id);
+                    message('danger', r.message);
+                } else {
+                    message('warning', 'Pas de connexion : les notes sont gardées sur ce téléphone et seront envoyées automatiquement dès que la connexion reviendra.');
+                }
+            } catch (e) {
+                message('danger', 'Impossible d\'enregistrer les notes : ' + e.message);
+            } finally {
+                boutonEnvoi.disabled = false;
+                boutonEnvoi.textContent = texteBouton;
             }
         });
     })();
