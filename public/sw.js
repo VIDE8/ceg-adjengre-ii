@@ -1,5 +1,5 @@
-// Service worker - CEG ADJENGRE II (v4)
-const VERSION = 'v5';
+// Service worker - CEG ADJENGRE II (v6)
+const VERSION = 'v6';
 const ASSETS_CACHE = `ceg-assets-${VERSION}`;
 const PAGES_CACHE = `ceg-pages-${VERSION}`;
 const KEEP = [ASSETS_CACHE, PAGES_CACHE];
@@ -16,8 +16,35 @@ const OFFLINE_HTML = `<!doctype html><html lang="fr"><head><meta charset="utf-8"
 <style>body{font-family:sans-serif;background:#f8f9fa;color:#1a252f;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;text-align:center;padding:20px}h1{color:#006a4e;font-size:22px}p{color:#555}</style></head>
 <body><div><h1>Page non disponible hors ligne</h1><p>Ouvrez cette page une fois avec Internet, elle sera ensuite disponible sans connexion.</p></div></body></html>`;
 
-const offlinePage = () =>
-  new Response(OFFLINE_HTML, { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+const NOMS_PAGES = {
+  '/appels': 'Appel',
+  '/notes': 'Notes',
+  '/notes/saisie': 'Saisie des notes',
+  '/retards': 'Retards',
+  '/permissions': 'Permissions',
+  '/eleves': 'Registre des élèves',
+};
+
+// Page de secours : propose les pages déjà ouvertes avec Internet
+async function offlinePage() {
+  const cache = await caches.open(PAGES_CACHE);
+  const vues = new Set();
+  const liens = [];
+  for (const req of await cache.keys()) {
+    const u = new URL(req.url);
+    const rep = await cache.match(req);
+    if (!rep || rep.status !== 200 || vues.has(u.pathname)) continue;
+    vues.add(u.pathname);
+    const href = (u.pathname + u.search).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    const nom = (NOMS_PAGES[u.pathname] || u.pathname).replace(/</g, '&lt;');
+    liens.push(`<li><a href="${href}">${nom}</a></li>`);
+  }
+  const suite = liens.length
+    ? `<p>Pages disponibles sans connexion :</p><ul style="list-style:none;padding:0;font-size:18px;line-height:2">${liens.join('')}</ul>`
+    : '';
+  const html = OFFLINE_HTML.replace('</div></body>', suite + '</div></body>');
+  return new Response(html, { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+}
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -85,10 +112,27 @@ async function pageStrategy(request) {
   const cached = await cache.match(request);
   try {
     const r = await (cached ? fetchWithTimeout(request, 4000) : fetch(request));
-    if (r.ok && !r.redirected) cache.put(request, r.clone());
+    if (r.ok) {
+      const finale = new URL(r.url);
+      const interdit = NEVER_CACHE.some((p) => finale.pathname.startsWith(p));
+      if (!interdit) {
+        if (r.redirected) {
+          // Ex. "/" renvoie vers /appels : on garde la page à son adresse finale
+          // et un renvoi depuis l'adresse de départ (l'icône de l'appli ouvre "/")
+          const corps = await r.clone().blob();
+          const type = r.headers.get('Content-Type') || 'text/html; charset=utf-8';
+          await cache.put(new Request(r.url), new Response(corps, { status: 200, headers: { 'Content-Type': type } }));
+          await cache.put(request, Response.redirect(r.url, 302));
+        } else {
+          await cache.put(request, r.clone());
+        }
+      }
+    }
     return r;
   } catch (e) {
-    return cached || offlinePage();
+    return cached
+      || (await cache.match(request, { ignoreSearch: true }))
+      || (await offlinePage());
   }
 }
 
