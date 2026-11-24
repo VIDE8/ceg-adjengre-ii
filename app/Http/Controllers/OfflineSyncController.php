@@ -2,7 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Controllers\Api\EleveApiController;
 use App\Models\OfflineAction;
+use App\Models\Trimestre;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
@@ -11,6 +13,14 @@ use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 class OfflineSyncController extends Controller
 {
+    // Qui a le droit d'envoyer quel type d'action
+    private const ROLES = [
+        'appel'     => ['admin', 'professeur'],
+        'note'      => ['professeur'],
+        'eleve'     => ['admin', 'comptable'],
+        'trimestre' => ['admin'],
+    ];
+
     // Jeton CSRF frais + identité : le téléphone les demande juste avant d'envoyer sa file d'attente
     public function token(Request $request)
     {
@@ -25,7 +35,7 @@ class OfflineSyncController extends Controller
         $request->validate([
             'actions'           => 'required|array|max:50',
             'actions.*.uuid'    => 'required|uuid',
-            'actions.*.type'    => 'required|string|in:appel,note',
+            'actions.*.type'    => 'required|string|in:' . implode(',', array_keys(self::ROLES)),
             'actions.*.payload' => 'required|array',
         ]);
 
@@ -34,6 +44,7 @@ class OfflineSyncController extends Controller
 
         foreach ($request->input('actions') as $action) {
             $uuid = $action['uuid'];
+            $type = $action['type'];
 
             // Déjà reçue (envoi répété après une coupure) : on ne la refait pas
             if (OfflineAction::where('uuid', $uuid)->exists()) {
@@ -41,16 +52,23 @@ class OfflineSyncController extends Controller
                 continue;
             }
 
+            if (!in_array($user->role, self::ROLES[$type], true)) {
+                $resultats[] = ['uuid' => $uuid, 'status' => 'error', 'message' => 'Action non autorisée pour votre profil.'];
+                continue;
+            }
+
             try {
-                $message = match ($action['type']) {
-                    'appel' => $this->traiterAppel($user, $action['payload']),
-                    'note'  => $this->traiterNote($user, $action['payload']),
+                $message = match ($type) {
+                    'appel'     => $this->traiterAppel($user, $action['payload']),
+                    'note'      => $this->traiterNote($user, $action['payload']),
+                    'eleve'     => $this->traiterEleve($action['payload']),
+                    'trimestre' => $this->traiterTrimestre($action['payload']),
                 };
 
-                OfflineAction::create(['uuid' => $uuid, 'user_id' => $user->id, 'type' => $action['type']]);
+                OfflineAction::create(['uuid' => $uuid, 'user_id' => $user->id, 'type' => $type]);
                 $resultats[] = ['uuid' => $uuid, 'status' => 'ok', 'message' => $message];
             } catch (ValidationException $e) {
-                // Refus définitif : on explique pourquoi au professeur
+                // Refus définitif : on explique pourquoi à l'utilisateur
                 $resultats[] = ['uuid' => $uuid, 'status' => 'error', 'message' => collect($e->errors())->flatten()->first()];
             } catch (HttpExceptionInterface | \DomainException $e) {
                 $resultats[] = ['uuid' => $uuid, 'status' => 'error', 'message' => $e->getMessage() ?: 'Action refusée.'];
@@ -90,5 +108,23 @@ class OfflineSyncController extends Controller
         $affectation = $resultat['affectation'];
 
         return 'Notes enregistrées : ' . $affectation->classe->niveau . ' ' . $affectation->classe->nom_classe . ' — ' . $affectation->matiere->nom . '.';
+    }
+
+    private function traiterEleve(array $payload): string
+    {
+        $donnees = Validator::make($payload, EleveApiController::reglesInscription())->validate();
+
+        $eleve = app(EleveApiController::class)->inscrire($donnees);
+
+        return "Élève inscrit : {$eleve->nom} {$eleve->prenom} (matricule {$eleve->matricule}).";
+    }
+
+    private function traiterTrimestre(array $payload): string
+    {
+        $donnees = Validator::make($payload, TrimestreController::regles($payload), TrimestreController::messages())->validate();
+
+        Trimestre::create($donnees);
+
+        return 'Trimestre enregistré.';
     }
 }
