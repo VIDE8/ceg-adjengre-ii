@@ -57,9 +57,10 @@ class TrimestreController extends Controller
         return redirect()->route('trimestres.index')->with('success', 'Trimestre supprimé.');
     }
 
-    private function valider(Request $request, ?Trimestre $trimestre = null): array
+    // Règles d'un trimestre : les mêmes pour le formulaire et pour la synchronisation hors ligne
+    public static function regles(array $donnees, ?int $ignorerId = null): array
     {
-        return $request->validate([
+        return [
             'annee_scolaire_id' => ['required', Rule::exists(AnneeScolaire::class, 'id')],
             'numero' => [
                 'required',
@@ -67,14 +68,24 @@ class TrimestreController extends Controller
                 'between:1,3',
                 // Un seul 1er, 2ème et 3ème trimestre par année scolaire
                 Rule::unique(Trimestre::class, 'numero')
-                    ->where('annee_scolaire_id', $request->annee_scolaire_id)
-                    ->ignore($trimestre?->id),
+                    ->where('annee_scolaire_id', $donnees['annee_scolaire_id'] ?? null)
+                    ->ignore($ignorerId),
             ],
             'date_debut' => 'required|date',
             'date_fin' => 'required|date|after_or_equal:date_debut',
-        ], [
+        ];
+    }
+
+    public static function messages(): array
+    {
+        return [
             'numero.unique' => 'Ce trimestre existe déjà pour cette année scolaire.',
             'date_fin.after_or_equal' => 'La date de fin doit être après la date de début.',
-        ]);
+        ];
+    }
+
+    private function valider(Request $request, ?Trimestre $trimestre = null): array
+    {
+        return $request->validate(self::regles($request->all(), $trimestre?->id), self::messages());
     }
 }
