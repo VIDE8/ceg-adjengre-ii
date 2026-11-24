@@ -24,24 +24,24 @@
                         <tr>
                             <th>Classe</th>
                             <th>Matière</th>
-                            <th class="text-center">Coefficient</th>
-                            <th></th>
+                            <th class="text-center d-none d-md-table-cell">Coefficient</th>
+                            <th class="d-none d-md-table-cell"></th>
                             <th class="text-end">Action</th>
                         </tr>
                     </thead>
                     <tbody>
                         @foreach($affectations as $a)
-                        <tr>
+                        <tr style="cursor: pointer" onclick="window.location.href='{{ route('notes.saisie', ['classe_id' => $a->classe_id, 'matiere_id' => $a->matiere_id]) }}'">
                             <td class="fw-bold">{{ $a->classe->niveau }} {{ $a->classe->nom_classe }}</td>
                             <td>{{ $a->matiere->nom }}</td>
-                            <td class="text-center"><span class="badge bg-secondary">{{ $a->coefficient }}</span></td>
-                            <td>
+                            <td class="text-center d-none d-md-table-cell"><span class="badge bg-secondary">{{ $a->coefficient }}</span></td>
+                            <td class="d-none d-md-table-cell">
                                 @if($a->classe->professeur_id == auth()->id())
                                 <span class="badge bg-success">Professeur titulaire</span>
                                 @endif
                             </td>
                             <td class="text-end">
-                                <a href="{{ route('notes.saisie', ['classe_id' => $a->classe_id, 'matiere_id' => $a->matiere_id]) }}" class="btn btn-sm btn-warning fw-bold text-dark">
+                                <a href="{{ route('notes.saisie', ['classe_id' => $a->classe_id, 'matiere_id' => $a->matiere_id]) }}" class="btn btn-sm btn-warning fw-bold text-dark text-nowrap">
                                     Saisir les notes
                                 </a>
                             </td>
