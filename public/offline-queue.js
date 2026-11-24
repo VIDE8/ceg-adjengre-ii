@@ -149,7 +149,10 @@
         } else if (r.status === 'error') { await marquerErreur(r.uuid, r.message); }
       }
       // La page ouverte vient de changer côté serveur : on renouvelle sa copie gardée pour le hors ligne
-      if (unOk) { precharger([location.pathname + location.search], true); }
+      if (unOk) {
+        precharger([location.pathname + location.search], true);
+        window.dispatchEvent(new Event('offline-synced'));
+      }
     } catch (e) {
       // Pas de réseau : tout reste dans la file, on réessaiera
     }
@@ -213,4 +216,3 @@
 
   window.OfflineQueue = { enqueue: enqueue, flush: flush, enLigne: enLigne, supprimer: supprimer, toutes: toutes, precharger: precharger };
 })();
-            
