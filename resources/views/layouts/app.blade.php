@@ -6,6 +6,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <meta name="user-id" content="{{ auth()->id() }}">
+    @auth
+    @php
+        $pagesHorsLigne = [
+            'admin'       => ['/', '/eleves', '/api/eleves?', '/trimestres', '/annees-scolaires', '/matieres', '/affectations'],
+            'comptable'   => ['/eleves', '/api/eleves?'],
+            'professeur'  => ['/notes', '/appels'],
+            'surveillant' => ['/retards', '/permissions'],
+        ][auth()->user()->role] ?? [];
+    @endphp
+    <meta name="offline-precache" content="{{ implode('|', $pagesHorsLigne) }}">
+    @endauth
     <title>@yield('title', 'CEG ADJENGRE II')</title>
 
     <!-- PWA -->
