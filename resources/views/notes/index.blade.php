@@ -55,3 +55,16 @@
     @endif
 </div>
 @endsection
+
+@section('scripts')
+@php
+$pagesHorsLigne = array_merge(
+    [route('notes.index', [], false), route('appels.index', [], false)],
+    $affectations->map(fn ($a) => route('notes.saisie', ['classe_id' => $a->classe_id, 'matiere_id' => $a->matiere_id], false))->all()
+);
+@endphp
+<script>
+    // Avec Internet, on garde ces pages dans le téléphone pour pouvoir saisir les notes et faire l'appel sans connexion
+    OfflineQueue.precharger(@json($pagesHorsLigne));
+</script>
+@endsection
