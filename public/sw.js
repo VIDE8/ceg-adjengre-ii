@@ -1,5 +1,5 @@
-// Service worker - CEG ADJENGRE II (v7)
-const VERSION = 'v7';
+// Service worker - CEG ADJENGRE II (v8)
+const VERSION = 'v8';
 const ASSETS_CACHE = `ceg-assets-${VERSION}`;
 const PAGES_CACHE = `ceg-pages-${VERSION}`;
 const KEEP = [ASSETS_CACHE, PAGES_CACHE];
@@ -9,6 +9,9 @@ const SHELL_ASSETS = [
   '/offline-queue.js',
 ];
 // Pages à ne jamais mettre en cache
+// Bootstrap, flatpickr et polices viennent d'autres sites : on les garde aussi pour l'affichage hors ligne
+const CDN_HOSTS = ['cdn.jsdelivr.net', 'fonts.googleapis.com', 'fonts.gstatic.com'];
+
 const NEVER_CACHE = ['/login', '/logout', '/api/', '/offline/'];
 
 const OFFLINE_HTML = `<!doctype html><html lang="fr"><head><meta charset="utf-8">
@@ -87,7 +90,7 @@ async function assetStrategy(request) {
   if (cached) return cached;
   try {
     const r = await fetch(request);
-    if (r.ok) cache.put(request, r.clone());
+    if (r.ok || r.type === 'opaque') cache.put(request, r.clone());
     return r;
   } catch (e) {
     return Response.error();
@@ -141,6 +144,10 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
 
   const url = new URL(request.url);
+  if (CDN_HOSTS.includes(url.hostname)) {
+    event.respondWith(assetStrategy(request));
+    return;
+  }
   if (url.origin !== self.location.origin) return;
   if (NEVER_CACHE.some((p) => url.pathname.startsWith(p))) return;
 
