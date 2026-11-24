@@ -42,7 +42,7 @@ Route::middleware(['auth', VerifierCompte::class])->group(function () {
 
     // Mode hors ligne : jeton frais et réception des actions faites sans connexion
     Route::get('/offline/token', [OfflineSyncController::class, 'token']);
-    Route::post('/offline/sync', [OfflineSyncController::class, 'sync'])->middleware('role:admin,professeur');
+    Route::post('/offline/sync', [OfflineSyncController::class, 'sync']);
 
     // Mon compte : chaque utilisateur modifie son nom, son e-mail et son mot de passe
     Route::get('/mon-compte', [CompteController::class, 'edit'])->name('compte.edit');
