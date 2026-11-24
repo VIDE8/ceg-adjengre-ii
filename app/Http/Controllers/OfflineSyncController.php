@@ -25,7 +25,7 @@ class OfflineSyncController extends Controller
         $request->validate([
             'actions'           => 'required|array|max:50',
             'actions.*.uuid'    => 'required|uuid',
-            'actions.*.type'    => 'required|string|in:appel',
+            'actions.*.type'    => 'required|string|in:appel,note',
             'actions.*.payload' => 'required|array',
         ]);
 
@@ -44,6 +44,7 @@ class OfflineSyncController extends Controller
             try {
                 $message = match ($action['type']) {
                     'appel' => $this->traiterAppel($user, $action['payload']),
+                    'note'  => $this->traiterNote($user, $action['payload']),
                 };
 
                 OfflineAction::create(['uuid' => $uuid, 'user_id' => $user->id, 'type' => $action['type']]);
@@ -74,5 +75,20 @@ class OfflineSyncController extends Controller
         }
 
         return $resultat['message'];
+    }
+
+    private function traiterNote($user, array $payload): string
+    {
+        $controleur = app(NoteController::class);
+
+        // Accepte la virgule comme séparateur décimal (12,5)
+        $payload['notes'] = $controleur->normaliser($payload['notes'] ?? []);
+
+        $donnees = Validator::make($payload, NoteController::regles(), NoteController::messages())->validate();
+
+        $resultat = $controleur->appliquer($user, $donnees);
+        $affectation = $resultat['affectation'];
+
+        return 'Notes enregistrées : ' . $affectation->classe->niveau . ' ' . $affectation->classe->nom_classe . ' — ' . $affectation->matiere->nom . '.';
     }
 }
