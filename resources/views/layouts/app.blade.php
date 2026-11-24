@@ -5,6 +5,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="csrf-token" content="{{ csrf_token() }}">
+    <meta name="user-id" content="{{ auth()->id() }}">
     <title>@yield('title', 'CEG ADJENGRE II')</title>
 
     <!-- PWA -->
@@ -182,7 +183,7 @@
                             {{ $user->name }}
                             <span class="badge bg-secondary">{{ strtoupper($user->role) }}</span>
                         </a>
-                        <form action="{{ route('logout') }}" method="POST" class="d-inline">
+                        <form action="{{ route('logout') }}" method="POST" class="d-inline" onsubmit="if (navigator.serviceWorker && navigator.serviceWorker.controller) { navigator.serviceWorker.controller.postMessage('CLEAR_PAGES'); }">
                             @csrf
                             <button type="submit" class="btn btn-sm btn-outline-secondary">Déconnexion</button>
                         </form>
@@ -223,6 +224,12 @@
             });
         });
     </script>
+
+    @auth
+    <!-- Mode hors ligne : zone d'état + file d'attente -->
+    <div id="offline-panel" class="position-fixed bottom-0 start-0 end-0 px-2 pt-2" style="z-index: 1080; pointer-events: none;"></div>
+    <script src="/offline-queue.js"></script>
+    @endauth
 
     @yield('scripts')
 
