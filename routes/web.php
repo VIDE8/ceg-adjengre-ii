@@ -22,10 +22,14 @@ use App\Http\Controllers\PermissionController;
 use App\Http\Controllers\EcolageController;
 use App\Http\Controllers\AppelController;
 use App\Http\Controllers\UtilisateurController;
+use App\Http\Controllers\OfflineSyncController;
 use App\Http\Middleware\VerifierCompte;
 use App\Models\Classe;
 use App\Models\User;
 use Illuminate\Support\Facades\Auth;
+
+// Test de vraie connexion (utilisé par le mode hors ligne)
+Route::get('/offline/ping', fn () => response()->noContent());
 
 Route::middleware(['guest'])->group(function () {
     Route::get('/login', [AuthController::class, 'showLogin'])->name('login');
@@ -35,6 +39,10 @@ Route::middleware(['guest'])->group(function () {
 Route::middleware(['auth', VerifierCompte::class])->group(function () {
 
     Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
+
+    // Mode hors ligne : jeton frais et réception des actions faites sans connexion
+    Route::get('/offline/token', [OfflineSyncController::class, 'token']);
+    Route::post('/offline/sync', [OfflineSyncController::class, 'sync'])->middleware('role:admin,professeur');
 
     // Mon compte : chaque utilisateur modifie son nom, son e-mail et son mot de passe
     Route::get('/mon-compte', [CompteController::class, 'edit'])->name('compte.edit');
