@@ -1,5 +1,5 @@
-// Service worker - CEG ADJENGRE II (v6)
-const VERSION = 'v6';
+// Service worker - CEG ADJENGRE II (v7)
+const VERSION = 'v7';
 const ASSETS_CACHE = `ceg-assets-${VERSION}`;
 const PAGES_CACHE = `ceg-pages-${VERSION}`;
 const KEEP = [ASSETS_CACHE, PAGES_CACHE];
@@ -151,7 +151,7 @@ self.addEventListener('fetch', (event) => {
     ['style', 'script', 'font', 'image'].includes(request.destination)
   ) {
     event.respondWith(assetStrategy(request));
-  } else if (request.mode === 'navigate') {
+  } else if (request.mode === 'navigate' || request.headers.get('X-Precache') === '1') {
     event.respondWith(pageStrategy(request));
   }
 });
