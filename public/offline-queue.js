@@ -139,17 +139,43 @@
 
       var data = await res.json();
       etat.session = true;
+      var unOk = false;
       for (var k = 0; k < data.results.length; k++) {
         var r = data.results[k];
         resultats[r.uuid] = r;
-        if (r.status === 'ok' || r.status === 'duplicate') { await tx('readwrite', function (s) { return s.delete(r.uuid); }); }
-        else if (r.status === 'error') { await marquerErreur(r.uuid, r.message); }
+        if (r.status === 'ok' || r.status === 'duplicate') {
+          unOk = true;
+          await tx('readwrite', function (s) { return s.delete(r.uuid); });
+        } else if (r.status === 'error') { await marquerErreur(r.uuid, r.message); }
       }
+      // La page ouverte vient de changer côté serveur : on renouvelle sa copie gardée pour le hors ligne
+      if (unOk) { precharger([location.pathname + location.search], true); }
     } catch (e) {
       // Pas de réseau : tout reste dans la file, on réessaiera
     }
     majPanneau();
     return resultats;
+  }
+
+  // Télécharge des pages à l'avance (avec Internet) pour qu'elles s'ouvrent ensuite sans connexion.
+  // Chaque page n'est renouvelée qu'une fois par demi-heure, sauf si on le demande.
+  async function precharger(urls, forcer) {
+    try {
+      if (!(await enLigne())) { return; }
+      for (var i = 0; i < urls.length; i++) {
+        var cle = 'precache:' + USER_ID + ':' + urls[i];
+        var dernier = 0;
+        try { dernier = parseInt(localStorage.getItem(cle) || '0', 10); } catch (e) {}
+        if (!forcer && Date.now() - dernier < 30 * 60 * 1000) { continue; }
+        try {
+          var r = await fetchTimeout(urls[i], {
+            credentials: 'same-origin',
+            headers: { 'X-Precache': '1', 'Accept': 'text/html' }
+          }, 20000);
+          if (r.ok) { try { localStorage.setItem(cle, String(Date.now())); } catch (e) {} }
+        } catch (e) { /* tant pis, on réessaiera plus tard */ }
+      }
+    } catch (e) {}
   }
 
   async function majPanneau() {
@@ -185,5 +211,6 @@
   window.addEventListener('load', function () { majPanneau(); flush(); });
   setInterval(flush, 30000);
 
-  window.OfflineQueue = { enqueue: enqueue, flush: flush, enLigne: enLigne, supprimer: supprimer, toutes: toutes };
+  window.OfflineQueue = { enqueue: enqueue, flush: flush, enLigne: enLigne, supprimer: supprimer, toutes: toutes, precharger: precharger };
 })();
+            
