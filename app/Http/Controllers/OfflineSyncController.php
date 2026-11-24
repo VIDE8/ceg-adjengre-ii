@@ -3,9 +3,10 @@
 namespace App\Http\Controllers;
 
 use App\Http\Controllers\Api\EleveApiController;
+use App\Models\Eleve;
 use App\Models\OfflineAction;
-use App\Models\Trimestre;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\ValidationException;
@@ -13,12 +14,14 @@ use Symfony\Component\HttpKernel\Exception\HttpExceptionInterface;
 
 class OfflineSyncController extends Controller
 {
-    // Qui a le droit d'envoyer quel type d'action
-    private const ROLES = [
-        'appel'     => ['admin', 'professeur'],
-        'note'      => ['professeur'],
-        'eleve'     => ['admin', 'comptable'],
-        'trimestre' => ['admin'],
+    // Formulaires simples du directeur : type => [contrôleur, libellé]
+    // Chaque action rejoue la méthode store() du contrôleur, avec les mêmes règles de validation.
+    private const FORMULAIRES = [
+        'trimestre'   => [TrimestreController::class, 'Trimestre'],
+        'annee'       => [AnneeScolaireController::class, 'Année scolaire'],
+        'classe'      => [ClasseController::class, 'Classe'],
+        'matiere'     => [MatiereController::class, 'Matière'],
+        'affectation' => [AffectationController::class, 'Affectation'],
     ];
 
     // Jeton CSRF frais + identité : le téléphone les demande juste avant d'envoyer sa file d'attente
@@ -32,10 +35,12 @@ class OfflineSyncController extends Controller
     // Reçoit les actions faites sans connexion et les enregistre une par une
     public function sync(Request $request)
     {
+        $types = implode(',', array_merge(['appel', 'note', 'eleve'], array_keys(self::FORMULAIRES)));
+
         $request->validate([
             'actions'           => 'required|array|max:50',
             'actions.*.uuid'    => 'required|uuid',
-            'actions.*.type'    => 'required|string|in:' . implode(',', array_keys(self::ROLES)),
+            'actions.*.type'    => 'required|string|in:' . $types,
             'actions.*.payload' => 'required|array',
         ]);
 
@@ -44,7 +49,6 @@ class OfflineSyncController extends Controller
 
         foreach ($request->input('actions') as $action) {
             $uuid = $action['uuid'];
-            $type = $action['type'];
 
             // Déjà reçue (envoi répété après une coupure) : on ne la refait pas
             if (OfflineAction::where('uuid', $uuid)->exists()) {
@@ -52,20 +56,21 @@ class OfflineSyncController extends Controller
                 continue;
             }
 
-            if (!in_array($user->role, self::ROLES[$type], true)) {
-                $resultats[] = ['uuid' => $uuid, 'status' => 'error', 'message' => 'Action non autorisée pour votre profil.'];
-                continue;
-            }
-
             try {
-                $message = match ($type) {
-                    'appel'     => $this->traiterAppel($user, $action['payload']),
-                    'note'      => $this->traiterNote($user, $action['payload']),
-                    'eleve'     => $this->traiterEleve($action['payload']),
-                    'trimestre' => $this->traiterTrimestre($action['payload']),
-                };
+                $message = DB::transaction(function () use ($user, $action, $uuid) {
+                    $message = match (true) {
+                        $action['type'] === 'appel' => $this->traiterAppel($user, $action['payload']),
+                        $action['type'] === 'note'  => $this->traiterNote($user, $action['payload']),
+                        $action['type'] === 'eleve' => $this->traiterEleve($user, $action['payload']),
+                        default                     => $this->traiterFormulaire($user, $action['type'], $action['payload']),
+                    };
 
-                OfflineAction::create(['uuid' => $uuid, 'user_id' => $user->id, 'type' => $type]);
+                    // L'uuid est noté dans la même transaction que l'action : jamais l'un sans l'autre
+                    OfflineAction::create(['uuid' => $uuid, 'user_id' => $user->id, 'type' => $action['type']]);
+
+                    return $message;
+                });
+
                 $resultats[] = ['uuid' => $uuid, 'status' => 'ok', 'message' => $message];
             } catch (ValidationException $e) {
                 // Refus définitif : on explique pourquoi à l'utilisateur
@@ -110,21 +115,42 @@ class OfflineSyncController extends Controller
         return 'Notes enregistrées : ' . $affectation->classe->niveau . ' ' . $affectation->classe->nom_classe . ' — ' . $affectation->matiere->nom . '.';
     }
 
-    private function traiterEleve(array $payload): string
+    // Inscription d'un élève : le matricule est attribué ici, à l'arrivée, pour éviter les doublons
+    private function traiterEleve($user, array $payload): string
     {
-        $donnees = Validator::make($payload, EleveApiController::reglesInscription())->validate();
+        abort_unless($user->hasRole('admin') || $user->hasRole('comptable'), 403, "Tu n'as pas le droit d'inscrire un élève.");
 
-        $eleve = app(EleveApiController::class)->inscrire($donnees);
+        $donnees = Validator::make($payload, [
+            'nom'            => 'required|string|max:255',
+            'prenom'         => 'required|string|max:255',
+            'sexe'           => 'required|in:M,F',
+            'date_naissance' => 'required|date',
+            'classes_id'     => 'required|exists:classes,id',
+            'statut'         => 'nullable|string|max:10',
+        ])->validate();
+
+        $donnees['matricule'] = EleveApiController::prochainMatricule();
+
+        $eleve = Eleve::create($donnees);
 
         return "Élève inscrit : {$eleve->nom} {$eleve->prenom} (matricule {$eleve->matricule}).";
     }
 
-    private function traiterTrimestre(array $payload): string
+    // Formulaires simples : on rejoue la méthode store() du contrôleur concerné
+    private function traiterFormulaire($user, string $type, array $payload): string
     {
-        $donnees = Validator::make($payload, TrimestreController::regles($payload), TrimestreController::messages())->validate();
+        abort_unless($user->hasRole('admin'), 403, "Seul le directeur peut faire cette action.");
 
-        Trimestre::create($donnees);
+        [$classe, $libelle] = self::FORMULAIRES[$type];
 
-        return 'Trimestre enregistré.';
+        $requete = Request::create('/', 'POST', array_map(fn ($v) => $v === '' ? null : $v, $payload));
+        $requete->setUserResolver(fn () => $user);
+
+        app($classe)->store($requete);
+
+        // store() prépare un message pour la page suivante : il ne doit pas s'afficher par erreur plus tard
+        session()->forget(['success', 'error', 'errors']);
+
+        return $libelle . ' enregistré(e).';
     }
 }
