@@ -6,6 +6,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <meta name="user-id" content="{{ auth()->id() }}">
+    <meta name="offline-precache" content="/eleves|/api/eleves?">
     <title>Registre des Élèves — React</title>
     <link href="https://fonts.googleapis.com" rel="stylesheet">
     @viteReactRefresh
@@ -45,7 +46,7 @@
 
                 <div class="navbar-nav align-items-center flex-row">
                     <span class="text-white-50 small me-3 fw-bold">{{ auth()->user()->name }} ({{ strtoupper(auth()->user()->role) }})</span>
-                    <form action="{{ route('logout') }}" method="POST" class="d-inline m-0">
+                    <form action="{{ route('logout') }}" method="POST" class="d-inline m-0" onsubmit="if (navigator.serviceWorker && navigator.serviceWorker.controller) { navigator.serviceWorker.controller.postMessage('CLEAR_PAGES'); }">
                         @csrf
                         <button type="submit" class="btn btn-sm btn-outline-light fw-bold">Déconnexion</button>
                     </form>
@@ -58,12 +59,9 @@
          Il consomme l'API JSON /api/eleves (voir routes/web.php + EleveApiController). --}}
     <div id="eleves-react-root"></div>
 
-    {{-- Mode hors ligne : zone d'état et file d'attente (chargée avant React) --}}
+    <!-- Mode hors ligne : zone d'état + file d'attente -->
     <div id="offline-panel" class="position-fixed bottom-0 start-0 end-0 px-2 pt-2" style="z-index: 1080; pointer-events: none;"></div>
     <script src="/offline-queue.js"></script>
-    <script>
-        OfflineQueue.precharger(['/eleves']);
-    </script>
 
 </body>
 
