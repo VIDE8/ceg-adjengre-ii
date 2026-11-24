@@ -6,7 +6,9 @@ use App\Http\Controllers\Controller;
 use App\Models\Classe;
 use App\Models\Eleve;
 use App\Services\EcolageService;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Contrôleur API (JSON) pour le module Élèves.
@@ -48,15 +50,7 @@ class EleveApiController extends Controller
         $situations = $ecolage->situations($eleves);
         $eleves->each(fn($e) => $e->setAttribute('ecolage', $situations[$e->id]));
 
-        // Prochain matricule : le plus grand numéro existant + 1
-        $prefixe = self::PREFIXE_MATRICULE;
-        $debutNumero = strlen($prefixe) + 1;
-
-        $dernierNumero = Eleve::where('matricule', 'LIKE', $prefixe . '%')
-            ->selectRaw("MAX(CAST(SUBSTRING(matricule, {$debutNumero}) AS UNSIGNED)) as max_num")
-            ->value('max_num');
-
-        $prochainMatricule = $prefixe . str_pad(($dernierNumero ?? 0) + 1, 3, '0', STR_PAD_LEFT);
+        $prochainMatricule = $this->prochainMatricule();
 
         // Classes triées 6ème, 5ème, 4ème, 3ème puis par nom
         $classes = Classe::all()
@@ -68,6 +62,52 @@ class EleveApiController extends Controller
             'classes' => $classes,
             'prochain_matricule' => $prochainMatricule,
         ]);
+    }
+
+    // Prochain matricule : le plus grand numéro existant + 1
+    public function prochainMatricule(): string
+    {
+        $prefixe = self::PREFIXE_MATRICULE;
+        $debutNumero = strlen($prefixe) + 1;
+
+        $dernierNumero = Eleve::where('matricule', 'LIKE', $prefixe . '%')
+            ->selectRaw("MAX(CAST(SUBSTRING(matricule, {$debutNumero}) AS UNSIGNED)) as max_num")
+            ->value('max_num');
+
+        return $prefixe . str_pad(($dernierNumero ?? 0) + 1, 3, '0', STR_PAD_LEFT);
+    }
+
+    // Règles d'une inscription reçue depuis la synchronisation hors ligne (le matricule est attribué à l'arrivée)
+    public static function reglesInscription(): array
+    {
+        return [
+            'nom'            => 'required|string|max:255',
+            'prenom'         => 'required|string|max:255',
+            'sexe'           => 'required|in:M,F',
+            'date_naissance' => 'required|date',
+            'classes_id'     => 'required|exists:classes,id',
+            'statut'         => 'nullable|string|max:10',
+        ];
+    }
+
+    // Inscrit un élève reçu hors ligne : le matricule est calculé maintenant, au moment de l'envoi,
+    // pour qu'aucun appareil ne puisse attribuer deux fois le même numéro.
+    public function inscrire(array $donnees): Eleve
+    {
+        for ($essai = 1; $essai <= 5; $essai++) {
+            try {
+                return DB::transaction(function () use ($donnees) {
+                    $eleve = Eleve::create($donnees + ['matricule' => $this->prochainMatricule()]);
+
+                    return $eleve->load('classe');
+                });
+            } catch (QueryException $e) {
+                // Deux inscriptions simultanées ont pris le même numéro : on recalcule et on recommence
+                if ($e->getCode() !== '23000' || $essai === 5) {
+                    throw $e;
+                }
+            }
+        }
     }
 
     /**
