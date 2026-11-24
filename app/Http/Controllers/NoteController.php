@@ -6,6 +6,7 @@ use App\Models\Affectation;
 use App\Models\Eleve;
 use App\Models\Note;
 use App\Models\Trimestre;
+use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -80,36 +81,61 @@ class NoteController extends Controller
         ));
     }
 
+    // Règles de validation des notes : les mêmes pour le formulaire et pour la synchronisation hors ligne
+    public static function regles(): array
+    {
+        return [
+            'classe_id'           => 'required|exists:classes,id',
+            'matiere_id'          => 'required|exists:matieres,id',
+            'trimestre_id'        => 'required|exists:trimestres,id',
+            'notes'               => 'nullable|array',
+            'notes.*.devoir.*'    => 'nullable|numeric|between:0,20',
+            'notes.*.composition' => 'nullable|numeric|between:0,20',
+        ];
+    }
+
+    public static function messages(): array
+    {
+        return [
+            'notes.*.devoir.*.numeric'    => 'Chaque note doit être un nombre.',
+            'notes.*.devoir.*.between'    => 'Chaque note doit être comprise entre 0 et 20.',
+            'notes.*.composition.numeric' => 'Chaque note doit être un nombre.',
+            'notes.*.composition.between' => 'Chaque note doit être comprise entre 0 et 20.',
+        ];
+    }
+
     // Enregistre toute la grille d'un coup
     public function enregistrer(Request $request)
     {
         // Accepte la virgule comme séparateur décimal (12,5)
         $request->merge(['notes' => $this->normaliser($request->input('notes', []))]);
 
-        $request->validate([
-            'classe_id'            => 'required|exists:classes,id',
-            'matiere_id'           => 'required|exists:matieres,id',
-            'trimestre_id'         => 'required|exists:trimestres,id',
-            'notes'                => 'nullable|array',
-            'notes.*.devoir.*'     => 'nullable|numeric|between:0,20',
-            'notes.*.composition'  => 'nullable|numeric|between:0,20',
-        ], [
-            'notes.*.devoir.*.numeric'    => 'Chaque note doit être un nombre.',
-            'notes.*.devoir.*.between'    => 'Chaque note doit être comprise entre 0 et 20.',
-            'notes.*.composition.numeric' => 'Chaque note doit être un nombre.',
-            'notes.*.composition.between' => 'Chaque note doit être comprise entre 0 et 20.',
-        ]);
+        $donnees = $request->validate(self::regles(), self::messages());
 
-        $affectation = $this->affectationDuProfesseur($request->classe_id, $request->matiere_id);
+        $resultat = $this->appliquer(Auth::user(), $donnees);
 
-        $trimestre = $this->trimestresActifs()->firstWhere('id', (int) $request->trimestre_id);
+        return redirect()
+            ->route('notes.saisie', [
+                'classe_id'    => $resultat['affectation']->classe_id,
+                'matiere_id'   => $resultat['affectation']->matiere_id,
+                'trimestre_id' => $resultat['trimestre']->id,
+            ])
+            ->with('success', 'Notes enregistrées avec succès !');
+    }
+
+    // Enregistre une grille déjà validée. Utilisée par le formulaire et par la synchronisation hors ligne.
+    public function appliquer(User $user, array $donnees): array
+    {
+        $affectation = $this->affectationDuProfesseur($donnees['classe_id'], $donnees['matiere_id'], $user->id);
+
+        $trimestre = $this->trimestresActifs()->firstWhere('id', (int) $donnees['trimestre_id']);
         abort_if(!$trimestre, 422, "Ce trimestre n'appartient pas à l'année scolaire active.");
 
         $eleveIds = Eleve::where('classes_id', $affectation->classe_id)->pluck('id')->all();
-        $userId = Auth::id();
+        $userId = $user->id;
 
-        DB::transaction(function () use ($request, $affectation, $trimestre, $eleveIds, $userId) {
-            foreach ($request->input('notes', []) as $eleveId => $saisie) {
+        DB::transaction(function () use ($donnees, $affectation, $trimestre, $eleveIds, $userId) {
+            foreach (($donnees['notes'] ?? []) as $eleveId => $saisie) {
                 // On ignore tout élève qui n'est pas dans cette classe
                 if (!in_array((int) $eleveId, $eleveIds, true)) {
                     continue;
@@ -147,22 +173,16 @@ class NoteController extends Controller
             }
         });
 
-        return redirect()
-            ->route('notes.saisie', [
-                'classe_id'    => $affectation->classe_id,
-                'matiere_id'   => $affectation->matiere_id,
-                'trimestre_id' => $trimestre->id,
-            ])
-            ->with('success', 'Notes enregistrées avec succès !');
+        return ['affectation' => $affectation, 'trimestre' => $trimestre];
     }
 
     // Le professeur ne peut saisir que les matières qui lui sont affectées dans la classe
-    private function affectationDuProfesseur($classeId, $matiereId): Affectation
+    private function affectationDuProfesseur($classeId, $matiereId, $userId = null): Affectation
     {
         $affectation = Affectation::with(['classe', 'matiere'])
             ->where('classe_id', $classeId)
             ->where('matiere_id', $matiereId)
-            ->where('professeur_id', Auth::id())
+            ->where('professeur_id', $userId ?? Auth::id())
             ->first();
 
         abort_if(!$affectation, 403, "Cette matière ne vous est pas affectée dans cette classe.");
@@ -195,7 +215,7 @@ class NoteController extends Controller
         return $commences->last() ?? $trimestres->first();
     }
 
-    private function normaliser($valeur)
+    public function normaliser($valeur)
     {
         if (is_array($valeur)) {
             return array_map(fn($v) => $this->normaliser($v), $valeur);
