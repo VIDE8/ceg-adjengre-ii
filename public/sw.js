@@ -9,9 +9,6 @@ const SHELL_ASSETS = [
   '/offline-queue.js',
 ];
 // Pages à ne jamais mettre en cache
-// Bootstrap, flatpickr et polices viennent d'autres sites : on les garde aussi pour l'affichage hors ligne
-const CDN_HOSTS = ['cdn.jsdelivr.net', 'fonts.googleapis.com', 'fonts.gstatic.com'];
-
 const NEVER_CACHE = ['/login', '/logout', '/api/', '/offline/'];
 
 const OFFLINE_HTML = `<!doctype html><html lang="fr"><head><meta charset="utf-8">
@@ -90,7 +87,7 @@ async function assetStrategy(request) {
   if (cached) return cached;
   try {
     const r = await fetch(request);
-    if (r.ok || r.type === 'opaque') cache.put(request, r.clone());
+    if (r.ok) cache.put(request, r.clone());
     return r;
   } catch (e) {
     return Response.error();
@@ -139,16 +136,32 @@ async function pageStrategy(request) {
   }
 }
 
+// Liste des élèves (JSON) : réseau d'abord, copie gardée dans le téléphone en secours.
+// Elle est rangée avec les pages : elle est donc effacée à la déconnexion.
+async function apiStrategy(request) {
+  const cache = await caches.open(PAGES_CACHE);
+  try {
+    const r = await fetchWithTimeout(request, 8000);
+    if (r.ok) cache.put(request, r.clone());
+    return r;
+  } catch (e) {
+    return (await cache.match(request))
+      || (await cache.match(request, { ignoreSearch: true }))
+      || Response.error();
+  }
+}
+
 self.addEventListener('fetch', (event) => {
   const { request } = event;
   if (request.method !== 'GET') return;
 
   const url = new URL(request.url);
-  if (CDN_HOSTS.includes(url.hostname)) {
-    event.respondWith(assetStrategy(request));
+  if (url.origin !== self.location.origin) return;
+
+  if (url.pathname === '/api/eleves') {
+    event.respondWith(apiStrategy(request));
     return;
   }
-  if (url.origin !== self.location.origin) return;
   if (NEVER_CACHE.some((p) => url.pathname.startsWith(p))) return;
 
   if (SHELL_ASSETS.includes(url.pathname)) {
