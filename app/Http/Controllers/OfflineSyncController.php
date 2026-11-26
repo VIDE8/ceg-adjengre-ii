@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Controllers\Api\EleveApiController;
 use App\Models\Eleve;
 use App\Models\OfflineAction;
+use App\Models\Permission;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -35,7 +36,7 @@ class OfflineSyncController extends Controller
     // Reçoit les actions faites sans connexion et les enregistre une par une
     public function sync(Request $request)
     {
-        $types = implode(',', array_merge(['appel', 'note', 'eleve'], array_keys(self::FORMULAIRES)));
+        $types = implode(',', array_merge(['appel', 'note', 'eleve', 'retard', 'permission', 'permission_retour'], array_keys(self::FORMULAIRES)));
 
         $request->validate([
             'actions'           => 'required|array|max:50',
@@ -57,21 +58,35 @@ class OfflineSyncController extends Controller
             }
 
             try {
-                $message = DB::transaction(function () use ($user, $action, $uuid) {
-                    $message = match (true) {
-                        $action['type'] === 'appel' => $this->traiterAppel($user, $action['payload']),
-                        $action['type'] === 'note'  => $this->traiterNote($user, $action['payload']),
-                        $action['type'] === 'eleve' => $this->traiterEleve($user, $action['payload']),
-                        default                     => $this->traiterFormulaire($user, $action['type'], $action['payload']),
+                $resultat = DB::transaction(function () use ($user, $action, $uuid) {
+                    $r = match (true) {
+                        $action['type'] === 'appel'              => $this->traiterAppel($user, $action['payload']),
+                        $action['type'] === 'note'               => $this->traiterNote($user, $action['payload']),
+                        $action['type'] === 'eleve'              => $this->traiterEleve($user, $action['payload']),
+                        $action['type'] === 'retard'             => $this->traiterRetard($user, $action['payload']),
+                        $action['type'] === 'permission'         => $this->traiterPermission($user, $action['payload']),
+                        $action['type'] === 'permission_retour'  => $this->traiterPermissionRetour($user, $action['payload']),
+                        default                                  => $this->traiterFormulaire($user, $action['type'], $action['payload']),
                     };
+                    $r = is_array($r) ? $r : ['message' => $r];
 
                     // L'uuid est noté dans la même transaction que l'action : jamais l'un sans l'autre
-                    OfflineAction::create(['uuid' => $uuid, 'user_id' => $user->id, 'type' => $action['type']]);
+                    OfflineAction::create([
+                        'uuid'     => $uuid,
+                        'user_id'  => $user->id,
+                        'type'     => $action['type'],
+                        'cible_id' => $r['cible_id'] ?? null,
+                    ]);
 
-                    return $message;
+                    return $r;
                 });
 
-                $resultats[] = ['uuid' => $uuid, 'status' => 'ok', 'message' => $message];
+                $resultats[] = [
+                    'uuid'    => $uuid,
+                    'status'  => 'ok',
+                    'message' => $resultat['message'],
+                    'billet'  => $resultat['billet'] ?? null,
+                ];
             } catch (ValidationException $e) {
                 // Refus définitif : on explique pourquoi à l'utilisateur
                 $resultats[] = ['uuid' => $uuid, 'status' => 'error', 'message' => collect($e->errors())->flatten()->first()];
@@ -134,6 +149,79 @@ class OfflineSyncController extends Controller
         $eleve = Eleve::create($donnees);
 
         return "Élève inscrit : {$eleve->nom} {$eleve->prenom} (matricule {$eleve->matricule}).";
+    }
+
+    // ---------- Surveillant : retards et permissions ----------
+
+    // Rejoue store() du contrôleur : mêmes règles de validation, et on retrouve l'identifiant de la fiche
+    // créée dans l'adresse du billet vers laquelle store() redirige.
+    private function creerFicheSurveillant($user, string $controleur, array $payload): array
+    {
+        abort_unless($user->hasRole('admin') || $user->hasRole('surveillant'), 403, "Seul le surveillant peut faire cette action.");
+
+        $requete = Request::create('/', 'POST', array_map(fn ($v) => $v === '' ? null : $v, $payload));
+        $requete->setUserResolver(fn () => $user);
+
+        $reponse = app($controleur)->store($requete);
+
+        // store() prépare un message pour la page suivante : il ne doit pas s'afficher par erreur plus tard
+        session()->forget(['success', 'error', 'errors']);
+
+        if (!preg_match('#/(retards|permissions)/(\d+)/billet#', (string) $reponse->getTargetUrl(), $m)) {
+            throw new \DomainException("Fiche enregistrée mais son billet est introuvable.");
+        }
+
+        return ['cible_id' => (int) $m[2], 'billet' => "/{$m[1]}/{$m[2]}/billet"];
+    }
+
+    private function traiterRetard($user, array $payload): array
+    {
+        $fiche = $this->creerFicheSurveillant($user, RetardController::class, $payload);
+        $eleve = Eleve::find($payload['eleve_id'] ?? 0);
+
+        return $fiche + [
+            'message' => 'Retard enregistré' . ($eleve ? " : {$eleve->nom} {$eleve->prenom}" : '') . '.',
+        ];
+    }
+
+    private function traiterPermission($user, array $payload): array
+    {
+        $fiche = $this->creerFicheSurveillant($user, PermissionController::class, $payload);
+        $eleve = Eleve::find($payload['eleve_id'] ?? 0);
+
+        return $fiche + [
+            'message' => 'Permission accordée' . ($eleve ? " : {$eleve->nom} {$eleve->prenom}" : '') . '.',
+        ];
+    }
+
+    // L'élève sorti revient : l'heure est celle du téléphone au moment du retour
+    private function traiterPermissionRetour($user, array $payload): string
+    {
+        abort_unless($user->hasRole('admin') || $user->hasRole('surveillant'), 403, "Seul le surveillant peut faire cette action.");
+
+        $donnees = Validator::make($payload, [
+            'permission_id' => 'nullable|integer',
+            'ref_uuid'      => 'nullable|uuid',
+            'heure'         => 'required|date_format:H:i',
+        ])->validate();
+
+        // Soit une permission déjà sur le serveur, soit une permission créée plus tôt hors ligne (référence par uuid)
+        $id = $donnees['permission_id']
+            ?? OfflineAction::where('uuid', $donnees['ref_uuid'] ?? '')->where('type', 'permission')->value('cible_id');
+
+        $permission = $id ? Permission::find($id) : null;
+
+        if (!$permission) {
+            throw new \DomainException("Retour non enregistré : la permission correspondante n'a pas été trouvée.");
+        }
+        if ($permission->type !== 'sortie') {
+            throw new \DomainException("Seule une sortie pendant les cours peut avoir un retour.");
+        }
+
+        $permission->heure_retour = $donnees['heure'];
+        $permission->save();
+
+        return 'Retour enregistré à ' . $donnees['heure'] . '.';
     }
 
     // Formulaires simples : on rejoue la méthode store() du contrôleur concerné
