@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 
 // Statuts possibles d'un élève (affichés sur le bulletin). À adapter si besoin.
 const STATUTS = [
@@ -24,6 +24,16 @@ function getCsrfToken() {
 function getClasseIdFromUrl() {
     const params = new URLSearchParams(window.location.search);
     return params.get('classe_id') || '';
+}
+
+// Filtre la liste (recherche + classe) aussi côté téléphone : la copie gardée hors ligne est la liste complète
+function filtrer(liste, terme, classe) {
+    const t = (terme || '').trim().toLowerCase();
+    return (liste || []).filter((e) => {
+        if (classe && String(e.classes_id) !== String(classe)) return false;
+        if (!t) return true;
+        return [e.nom, e.prenom, e.matricule].some((v) => String(v || '').toLowerCase().includes(t));
+    });
 }
 
 async function apiFetch(url, options = {}) {
@@ -174,6 +184,12 @@ export default function EleveApp() {
     const [form, setForm] = useState(FORM_VIDE);
     const [editForm, setEditForm] = useState(FORM_VIDE);
 
+    // Élèves inscrits sans connexion, pas encore envoyés
+    const [enAttente, setEnAttente] = useState([]);
+    const searchRef = useRef('');
+    const loadRef = useRef(null);
+    const precedentRef = useRef(0);
+
     const load = useCallback(async (searchTerm = '') => {
         setLoading(true);
         setError(null);
@@ -182,7 +198,7 @@ export default function EleveApp() {
             if (searchTerm) qs.set('search', searchTerm);
             if (classeId) qs.set('classe_id', classeId);
             const data = await apiFetch(`/api/eleves?${qs.toString()}`);
-            setEleves(data.eleves);
+            setEleves(filtrer(data.eleves, searchTerm, classeId));
             setClasses(data.classes);
             setProchainMatricule(data.prochain_matricule);
         } catch (e) {
@@ -195,6 +211,36 @@ export default function EleveApp() {
     useEffect(() => {
         load();
     }, [load]);
+
+    searchRef.current = search;
+    loadRef.current = load;
+
+    // Suit la file d'attente du téléphone : élèves en attente d'envoi, et liste rechargée quand ils partent
+    useEffect(() => {
+        let actif = true;
+
+        const lireAttente = async () => {
+            if (!window.OfflineQueue) return;
+            try {
+                const items = (await window.OfflineQueue.toutes()).filter((i) => i.type === 'eleve' && !i.error);
+                if (!actif) return;
+                setEnAttente(items);
+                if (items.length < precedentRef.current && loadRef.current) {
+                    loadRef.current(searchRef.current);
+                }
+                precedentRef.current = items.length;
+            } catch (err) {
+                // file d'attente illisible : on ne bloque pas la page
+            }
+        };
+
+        lireAttente();
+        window.addEventListener('offline-queue-change', lireAttente);
+        return () => {
+            actif = false;
+            window.removeEventListener('offline-queue-change', lireAttente);
+        };
+    }, []);
 
     function handleSearchSubmit(e) {
         e.preventDefault();
@@ -211,16 +257,39 @@ export default function EleveApp() {
             return;
         }
 
+        const file = window.OfflineQueue;
+        if (!file) {
+            setError("Le mode hors ligne n'est pas chargé. Recharge la page.");
+            return;
+        }
+
         try {
-            const data = await apiFetch('/api/eleves', {
-                method: 'POST',
-                body: JSON.stringify({ ...form, matricule: prochainMatricule }),
-            });
-            setSuccessMsg(data.message);
-            setForm(FORM_VIDE);
-            load(search);
-        } catch (e) {
-            setError(messageErreur(e, "Erreur lors de l'inscription de l'élève."));
+            // Le matricule est attribué par le serveur au moment de l'enregistrement
+            const donnees = {
+                nom: form.nom,
+                prenom: form.prenom,
+                sexe: form.sexe,
+                date_naissance: form.date_naissance,
+                statut: form.statut,
+                classes_id: form.classes_id,
+            };
+            const id = await file.enqueue('eleve', donnees, `Inscription de ${form.nom} ${form.prenom}`);
+            const resultats = await file.flush();
+            const r = resultats[id];
+
+            if (r && (r.status === 'ok' || r.status === 'duplicate')) {
+                setSuccessMsg(r.message || 'Élève inscrit avec succès !');
+                setForm(FORM_VIDE);
+                load(search);
+            } else if (r && r.status === 'error') {
+                await file.supprimer(id);
+                setError(r.message);
+            } else {
+                setSuccessMsg("Pas de connexion : l'élève est gardé sur ce téléphone. Il sera inscrit, avec son matricule, dès que la connexion reviendra.");
+                setForm(FORM_VIDE);
+            }
+        } catch (err) {
+            setError("Impossible d'enregistrer l'élève : " + (err && err.message ? err.message : 'erreur inconnue'));
         }
     }
 
@@ -278,6 +347,19 @@ export default function EleveApp() {
     const titreRegistre = classeActuelle
         ? `Élèves de ${classeActuelle.niveau} - ${classeActuelle.nom_classe}`
         : 'Registre Général des Élèves';
+
+    // Les élèves en attente d'envoi apparaissent en tête de liste
+    const elevesEnAttente = filtrer(
+        enAttente.map((i) => ({
+            ...i.payload,
+            id: `attente-${i.uuid}`,
+            enAttente: true,
+            classe: classes.find((c) => String(c.id) === String(i.payload.classes_id)) || null,
+        })),
+        search,
+        classeId
+    );
+    const elevesAffiches = [...elevesEnAttente, ...eleves];
 
     return (
         <div className="container my-4">
@@ -391,7 +473,7 @@ export default function EleveApp() {
                                     <input
                                         type="text"
                                         className="form-control bg-light fw-bold text-secondary"
-                                        value={prochainMatricule}
+                                        value="Attribué à l'enregistrement"
                                         readOnly
                                     />
                                 </div>
@@ -423,7 +505,7 @@ export default function EleveApp() {
                     <div className="card shadow-sm border-0">
                         <div className="card-body">
                             <h5 className="card-title fw-bold mb-3">
-                                {titreRegistre} ({eleves.length})
+                                {titreRegistre} ({elevesAffiches.length})
                             </h5>
 
                             {loading ? (
@@ -441,7 +523,7 @@ export default function EleveApp() {
                                             </tr>
                                         </thead>
                                         <tbody>
-                                            {eleves.length === 0 && (
+                                            {elevesAffiches.length === 0 && (
                                                 <tr>
                                                     <td colSpan={5} className="text-center text-muted small py-4">
                                                         Aucun élève trouvé.
@@ -449,8 +531,33 @@ export default function EleveApp() {
                                                 </tr>
                                             )}
 
-                                            {eleves.map((eleve) =>
-                                                editingId === eleve.id ? (
+                                            {elevesAffiches.map((eleve) =>
+                                                eleve.enAttente ? (
+                                                    <tr key={eleve.id} className="table-warning">
+                                                        <td className="small fw-bold text-muted">⏳ En attente</td>
+                                                        <td className="fw-bold text-uppercase">
+                                                            {eleve.nom} <span className="text-capitalize fw-normal">{eleve.prenom}</span>
+                                                            {eleve.statut && (
+                                                                <span className="badge bg-warning text-dark ms-2">{eleve.statut}</span>
+                                                            )}
+                                                            <small className="d-block text-muted fw-normal text-capitalize">
+                                                                {eleve.sexe === 'M' ? 'Masculin' : eleve.sexe === 'F' ? 'Féminin' : 'Sexe non renseigné'}
+                                                            </small>
+                                                        </td>
+                                                        <td>
+                                                            <span className="badge bg-success text-white px-2 py-1">
+                                                                {eleve.classe ? `${eleve.classe.niveau} ${eleve.classe.nom_classe}` : 'N/A'}
+                                                            </span>
+                                                            <small className="d-block text-muted">
+                                                                {calculAge(eleve.date_naissance)} ans · né(e) le {isoVersFr(eleve.date_naissance)}
+                                                            </small>
+                                                        </td>
+                                                        <td>
+                                                            <small className="text-muted">Sera inscrit dès le retour de la connexion</small>
+                                                        </td>
+                                                        <td></td>
+                                                    </tr>
+                                                ) : editingId === eleve.id ? (
                                                     <tr key={eleve.id}>
                                                         <td colSpan={5}>
                                                             <form
