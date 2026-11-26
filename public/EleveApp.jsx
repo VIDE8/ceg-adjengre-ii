@@ -1,175 +1,19 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
+import LigneEdition from './LigneEdition.jsx';
+import {
+    STATUTS,
+    FORM_VIDE,
+    getClasseIdFromUrl,
+    filtrer,
+    apiFetch,
+    messageErreur,
+    calculAge,
+    isoVersFr,
+    ChampDate,
+    StatutEcolage,
+} from './eleveOutils.jsx';
 
 // Statuts possibles d'un élève (affichés sur le bulletin). À adapter si besoin.
-const STATUTS = [
-    { valeur: 'N', libelle: 'Nouveau' },
-    { valeur: 'A', libelle: 'Ancien' },
-    { valeur: 'R', libelle: 'Redoublant' },
-];
-
-const FORM_VIDE = {
-    nom: '',
-    prenom: '',
-    sexe: '',
-    date_naissance: '',
-    statut: '',
-    classes_id: '',
-};
-
-function getCsrfToken() {
-    const meta = document.querySelector('meta[name="csrf-token"]');
-    return meta ? meta.getAttribute('content') : '';
-}
-
-function getClasseIdFromUrl() {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('classe_id') || '';
-}
-
-// Filtre la liste (recherche + classe) aussi côté téléphone : la copie gardée hors ligne est la liste complète
-function filtrer(liste, terme, classe) {
-    const t = (terme || '').trim().toLowerCase();
-    return (liste || []).filter((e) => {
-        if (classe && String(e.classes_id) !== String(classe)) return false;
-        if (!t) return true;
-        return [e.nom, e.prenom, e.matricule].some((v) => String(v || '').toLowerCase().includes(t));
-    });
-}
-
-async function apiFetch(url, options = {}) {
-    const response = await fetch(url, {
-        ...options,
-        credentials: 'same-origin',
-        headers: {
-            Accept: 'application/json',
-            'Content-Type': 'application/json',
-            'X-CSRF-TOKEN': getCsrfToken(),
-            ...(options.headers || {}),
-        },
-    });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-        throw { status: response.status, data };
-    }
-
-    return data;
-}
-
-// Affiche le premier message de validation renvoyé par le serveur
-function messageErreur(e, defaut) {
-    const erreurs = e?.data?.errors;
-    if (erreurs) {
-        const premiere = Object.values(erreurs)[0];
-        if (Array.isArray(premiere) && premiere.length) {
-            return premiere[0];
-        }
-    }
-    return e?.data?.message || defaut;
-}
-
-function calculAge(dateNaissance) {
-    const naissance = new Date(dateNaissance);
-    const diff = new Date() - naissance;
-    return Math.max(0, Math.floor(diff / (365.25 * 24 * 3600 * 1000)));
-}
-
-// ---- Dates au format jj/mm/aaaa ----
-
-// 2012-03-05 -> 05/03/2012
-function isoVersFr(iso) {
-    if (!iso) return '';
-    const [a, m, j] = String(iso).slice(0, 10).split('-');
-    return `${j}/${m}/${a}`;
-}
-
-// 05/03/2012 -> 2012-03-05 (ou '' si la date n'existe pas)
-function frVersIso(fr) {
-    const morceaux = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec(fr);
-    if (!morceaux) return '';
-    const [, j, m, a] = morceaux;
-    const date = new Date(`${a}-${m}-${j}T00:00:00`);
-    if (isNaN(date.getTime()) || date.getDate() !== Number(j) || date.getMonth() + 1 !== Number(m)) {
-        return '';
-    }
-    return `${a}-${m}-${j}`;
-}
-
-// Champ de date : on tape 05032012, les "/" s'ajoutent tout seuls
-function ChampDate({ value, onChange, className = 'form-control' }) {
-    const [texte, setTexte] = useState(isoVersFr(value));
-
-    useEffect(() => {
-        // Synchronise le texte quand le formulaire est vidé ou rempli de l'extérieur
-        if (frVersIso(texte) !== (value || '')) {
-            setTexte(isoVersFr(value));
-        }
-    }, [value]);
-
-    function handleChange(e) {
-        const chiffres = e.target.value.replace(/\D/g, '').slice(0, 8);
-        let t = chiffres;
-        if (chiffres.length > 4) {
-            t = `${chiffres.slice(0, 2)}/${chiffres.slice(2, 4)}/${chiffres.slice(4)}`;
-        } else if (chiffres.length > 2) {
-            t = `${chiffres.slice(0, 2)}/${chiffres.slice(2)}`;
-        }
-        setTexte(t);
-        onChange(frVersIso(t));
-    }
-
-    const invalide = texte.length === 10 && !frVersIso(texte);
-
-    return (
-        <input
-            type="text"
-            inputMode="numeric"
-            className={`${className}${invalide ? ' is-invalid' : ''}`}
-            placeholder="jj/mm/aaaa"
-            maxLength={10}
-            required
-            value={texte}
-            onChange={handleChange}
-        />
-    );
-}
-
-function StatutEcolage({ eleve }) {
-    const e = eleve.ecolage;
-    const f = (n) => Number(n).toLocaleString('fr-FR');
-
-    if (!e || e.statut === 'non_defini') {
-        return (
-            <span className="badge bg-secondary text-white w-100 py-1" title="Le comptable doit définir l'écolage de cette classe">
-                ⚪ Écolage non défini
-            </span>
-        );
-    }
-    if (e.statut === 'surplus') {
-        return (
-            <>
-                <span className="badge bg-danger text-white w-100 py-1">🔴 Surplus de {f(e.surplus)} F</span>
-                <small className="d-block text-danger text-center small">à vérifier · écolage {f(e.du)} F</small>
-            </>
-        );
-    }
-    if (e.statut === 'solde') {
-        return <span className="badge bg-success text-white w-100 py-1">🟢 Soldé ({f(e.du)} F)</span>;
-    }
-    if (e.statut === 'partiel') {
-        return (
-            <>
-                <span className="badge bg-warning text-dark w-100 py-1">🟡 Reste {f(e.reste)} F</span>
-                <small className="d-block text-muted text-center small">
-                    Payé: {f(e.paye)} F sur {f(e.du)} F
-                </small>
-            </>
-        );
-    }
-    return <span className="badge bg-danger text-white w-100 py-1">🔴 Non payé (-{f(e.du)} F)</span>;
-}
-
 export default function EleveApp() {
     const [classeId] = useState(getClasseIdFromUrl());
     const [eleves, setEleves] = useState([]);
@@ -494,7 +338,77 @@ export default function EleveApp() {
                                     </select>
                                 </div>
                                 <button type="submit" className="btn btn-primary w-100 fw-bold text-white">
-                       
+                                    Inscrire l'élève
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="col-md-8">
+                    <div className="card shadow-sm border-0">
+                        <div className="card-body">
+                            <h5 className="card-title fw-bold mb-3">
+                                {titreRegistre} ({elevesAffiches.length})
+                            </h5>
+
+                            {loading ? (
+                                <p className="text-muted small">Chargement...</p>
+                            ) : (
+                                <div className="table-responsive" style={{ maxHeight: 550, overflowY: 'auto' }}>
+                                    <table className="table table-hover align-middle">
+                                        <thead className="table-light sticky-top">
+                                            <tr>
+                                                <th>Matricule</th>
+                                                <th>Nom &amp; Prénom</th>
+                                                <th>Classe / Âge</th>
+                                                <th>Statut Écolage</th>
+                                                <th className="text-end">Actions</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {elevesAffiches.length === 0 && (
+                                                <tr>
+                                                    <td colSpan={5} className="text-center text-muted small py-4">
+                                                        Aucun élève trouvé.
+                                                    </td>
+                                                </tr>
+                                            )}
+
+                                            {elevesAffiches.map((eleve) =>
+                                                eleve.enAttente ? (
+                                                    <tr key={eleve.id} className="table-warning">
+                                                        <td className="small fw-bold text-muted">⏳ En attente</td>
+                                                        <td className="fw-bold text-uppercase">
+                                                            {eleve.nom} <span className="text-capitalize fw-normal">{eleve.prenom}</span>
+                                                            {eleve.statut && (
+                                                                <span className="badge bg-warning text-dark ms-2">{eleve.statut}</span>
+                                                            )}
+                                                            <small className="d-block text-muted fw-normal text-capitalize">
+                                                                {eleve.sexe === 'M' ? 'Masculin' : eleve.sexe === 'F' ? 'Féminin' : 'Sexe non renseigné'}
+                                                            </small>
+                                                        </td>
+                                                        <td>
+                                                            <span className="badge bg-success text-white px-2 py-1">
+                                                                {eleve.classe ? `${eleve.classe.niveau} ${eleve.classe.nom_classe}` : 'N/A'}
+                                                            </span>
+                                                            <small className="d-block text-muted">
+                                                                {calculAge(eleve.date_naissance)} ans · né(e) le {isoVersFr(eleve.date_naissance)}
+                                                            </small>
+                                                        </td>
+                                                        <td>
+                                                            <small className="text-muted">Sera inscrit dès le retour de la connexion</small>
+                                                        </td>
+                                                        <td></td>
+                                                    </tr>
+                                                ) : editingId === eleve.id ? (
+                                                    <LigneEdition
+                                                        key={eleve.id}
+                                                        eleve={eleve}
+                                                        editForm={editForm}
+                                                        setEditForm={setEditForm}
+                                                        classes={classes}
+                                                        onSubmit={(e) => ha
                                                                     </select>
                                                                 </div>
                                                                 <div>
