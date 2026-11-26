@@ -149,10 +149,7 @@
         } else if (r.status === 'error') { await marquerErreur(r.uuid, r.message); }
       }
       // La page ouverte vient de changer côté serveur : on renouvelle sa copie gardée pour le hors ligne
-      if (unOk) {
-        precharger([location.pathname + location.search], true);
-        window.dispatchEvent(new Event('offline-synced'));
-      }
+      if (unOk) { precharger([location.pathname + location.search], true); }
     } catch (e) {
       // Pas de réseau : tout reste dans la file, on réessaiera
     }
@@ -182,6 +179,7 @@
   }
 
   async function majPanneau() {
+    window.dispatchEvent(new CustomEvent('offline-queue-change'));
     var zone = document.getElementById('offline-panel');
     if (!zone) { return; }
     var items;
@@ -204,6 +202,79 @@
     zone.innerHTML = html;
   }
 
+  // ---------- Formulaires simples du directeur, utilisables sans connexion ----------
+  var FORMULAIRES = {
+    '/trimestres': { type: 'trimestre', nom: 'Trimestre' },
+    '/annees-scolaires': { type: 'annee', nom: 'Année scolaire' },
+    '/classes': { type: 'classe', nom: 'Classe' },
+    '/matieres': { type: 'matiere', nom: 'Matière' },
+    '/affectations': { type: 'affectation', nom: 'Affectation' }
+  };
+
+  function afficherMessage(form, type, texte) {
+    var zone = form.parentNode.querySelector('.offline-msg');
+    if (!zone) {
+      zone = document.createElement('div');
+      zone.className = 'offline-msg';
+      form.parentNode.insertBefore(zone, form);
+    }
+    zone.innerHTML = '<div class="alert alert-' + type + ' small py-2">' + esc(texte) + '</div>';
+  }
+
+  async function envoyerFormulaire(form, def) {
+    var bouton = form.querySelector('button[type=submit], input[type=submit]');
+    var texteBouton = bouton ? bouton.textContent : '';
+    if (bouton) { bouton.disabled = true; bouton.textContent = 'Enregistrement…'; }
+    try {
+      var donnees = {};
+      new FormData(form).forEach(function (v, k) {
+        if (k !== '_token' && k !== '_method' && typeof v === 'string') { donnees[k] = v; }
+      });
+      var resume = Object.keys(donnees).map(function (k) { return donnees[k]; })
+        .filter(Boolean).slice(0, 3).join(' · ');
+      var id = await enqueue(def.type, donnees, def.nom + ' : ' + resume);
+      var resultats = await flush();
+      var r = resultats[id];
+
+      if (r && (r.status === 'ok' || r.status === 'duplicate')) {
+        afficherMessage(form, 'success', r.message || (def.nom + ' enregistré(e).'));
+        form.reset();
+        setTimeout(function () { location.reload(); }, 1200);
+      } else if (r && r.status === 'error') {
+        await supprimer(id);
+        afficherMessage(form, 'danger', r.message);
+      } else {
+        afficherMessage(form, 'warning', 'Pas de connexion : c\'est gardé sur ce téléphone et sera envoyé automatiquement dès que la connexion reviendra.');
+        form.reset();
+      }
+    } catch (e) {
+      afficherMessage(form, 'danger', 'Impossible d\'enregistrer : ' + e.message);
+    } finally {
+      if (bouton) { bouton.disabled = false; bouton.textContent = texteBouton; }
+    }
+  }
+
+  function brancherFormulaires() {
+    document.querySelectorAll('form').forEach(function (form) {
+      if ((form.method || '').toLowerCase() !== 'post') { return; }
+      var chemin;
+      try { chemin = new URL(form.action, location.href).pathname.replace(/\/+$/, ''); } catch (e) { return; }
+      var def = FORMULAIRES[chemin];
+      // Les formulaires de modification ou de suppression (_method) restent en ligne
+      if (!def || form.querySelector('input[name="_method"]')) { return; }
+      form.addEventListener('submit', function (ev) {
+        ev.preventDefault();
+        envoyerFormulaire(form, def);
+      });
+    });
+  }
+
+  // Pages à garder pour le hors ligne, indiquées par la page elle-même selon le rôle
+  function precacheDeLaPage() {
+    var m = document.querySelector('meta[name="offline-precache"]');
+    if (m && m.content) { precharger(m.content.split('|').filter(Boolean)); }
+  }
+
   document.addEventListener('click', function (ev) {
     var b = ev.target.closest ? ev.target.closest('[data-supprimer]') : null;
     if (b) { supprimer(b.getAttribute('data-supprimer')); }
@@ -211,7 +282,12 @@
 
   window.addEventListener('online', flush);
   document.addEventListener('visibilitychange', function () { if (!document.hidden) { flush(); } });
-  window.addEventListener('load', function () { majPanneau(); flush(); });
+  window.addEventListener('load', function () {
+    majPanneau();
+    flush();
+    brancherFormulaires();
+    precacheDeLaPage();
+  });
   setInterval(flush, 30000);
 
   window.OfflineQueue = { enqueue: enqueue, flush: flush, enLigne: enLigne, supprimer: supprimer, toutes: toutes, precharger: precharger };
