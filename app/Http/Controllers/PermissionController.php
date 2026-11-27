@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Eleve;
 use App\Models\Permission;
+use App\Models\User;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -28,10 +29,10 @@ class PermissionController extends Controller
         return view('permissions.index', compact('date', 'permissions', 'eleves'));
     }
 
-    // Accorde la permission puis ouvre le document, prêt à imprimer
-    public function store(Request $request)
+    // Règles de validation : les mêmes pour le formulaire et pour la synchronisation hors ligne
+    public static function regles(): array
     {
-        $data = $request->validate([
+        return [
             'eleve_id'            => 'required|exists:eleves,id',
             'type'                => 'required|in:sortie,absence',
             'date_debut'          => 'required|date',
@@ -40,14 +41,23 @@ class PermissionController extends Controller
             'heure_retour_prevue' => 'nullable|date_format:H:i',
             'accompagnateur'      => 'nullable|string|max:100',
             'motif'               => 'required|string|max:150',
-        ], [
+        ];
+    }
+
+    public static function messages(): array
+    {
+        return [
             'eleve_id.required'          => 'Choisis l\'élève dans la liste.',
             'date_fin.required_if'       => 'Indique la date de fin de l\'absence.',
             'date_fin.after_or_equal'    => 'La date de fin doit être égale ou postérieure à la date de début.',
             'heure_sortie.required_if'   => 'Indique l\'heure de sortie.',
             'motif.required'             => 'Indique le motif de la permission.',
-        ]);
+        ];
+    }
 
+    // Accorde une permission déjà validée (formulaire ou synchronisation hors ligne)
+    public function creer(User $user, array $data): Permission
+    {
         $eleve = Eleve::findOrFail($data['eleve_id']);
 
         if ($data['type'] === 'sortie') {
@@ -56,10 +66,18 @@ class PermissionController extends Controller
             $data['heure_sortie'] = $data['heure_retour_prevue'] = $data['accompagnateur'] = null;
         }
 
-        $permission = Permission::create($data + [
+        return Permission::create($data + [
             'classe_id'    => $eleve->classes_id,
-            'accordee_par' => Auth::id(),
+            'accordee_par' => $user->id,
         ]);
+    }
+
+    // Accorde la permission puis ouvre le document, prêt à imprimer
+    public function store(Request $request)
+    {
+        $data = $request->validate(self::regles(), self::messages());
+
+        $permission = $this->creer(Auth::user(), $data);
 
         return redirect()->route('permissions.billet', ['permission' => $permission->id, 'imprimer' => 1]);
     }
@@ -71,13 +89,19 @@ class PermissionController extends Controller
         return view('permissions.billet', compact('permission'));
     }
 
-    // L'élève sorti revient : on note l'heure d'entrée
-    public function retour(Permission $permission)
+    // Note l'heure d'entrée de l'élève sorti. La synchronisation hors ligne donne l'heure réelle du retour.
+    public function enregistrerRetour(Permission $permission, ?string $heure = null): void
     {
         abort_unless($permission->type === 'sortie', 404);
 
-        $permission->heure_retour = now()->format('H:i');
+        $permission->heure_retour = $heure ?: now()->format('H:i');
         $permission->save();
+    }
+
+    // L'élève sorti revient : on note l'heure d'entrée
+    public function retour(Permission $permission)
+    {
+        $this->enregistrerRetour($permission);
 
         return back()->with('success', 'Retour enregistré à ' . $permission->heure_retour . '.');
     }

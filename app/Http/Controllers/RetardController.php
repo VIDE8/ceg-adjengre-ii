@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\AnneeScolaire;
 use App\Models\Eleve;
 use App\Models\Retard;
+use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 
@@ -36,25 +37,42 @@ class RetardController extends Controller
         return view('retards.index', compact('date', 'retards', 'totaux', 'eleves'));
     }
 
-    // Enregistre le retard puis ouvre le billet d'entrée, prêt à imprimer
-    public function store(Request $request)
+    // Règles de validation : les mêmes pour le formulaire et pour la synchronisation hors ligne
+    public static function regles(): array
     {
-        $data = $request->validate([
+        return [
             'eleve_id' => 'required|exists:eleves,id',
             'date'     => 'required|date',
             'heure'    => 'required|date_format:H:i',
             'motif'    => 'nullable|string|max:150',
-        ], [
+        ];
+    }
+
+    public static function messages(): array
+    {
+        return [
             'eleve_id.required' => 'Choisis l\'élève dans la liste.',
             'heure.date_format' => 'L\'heure doit être au format hh:mm.',
-        ]);
+        ];
+    }
 
+    // Enregistre un retard déjà validé (formulaire ou synchronisation hors ligne)
+    public function creer(User $user, array $data): Retard
+    {
         $eleve = Eleve::findOrFail($data['eleve_id']);
 
-        $retard = Retard::create($data + [
+        return Retard::create($data + [
             'classe_id'      => $eleve->classes_id,
-            'enregistre_par' => Auth::id(),
+            'enregistre_par' => $user->id,
         ]);
+    }
+
+    // Enregistre le retard puis ouvre le billet d'entrée, prêt à imprimer
+    public function store(Request $request)
+    {
+        $data = $request->validate(self::regles(), self::messages());
+
+        $retard = $this->creer(Auth::user(), $data);
 
         return redirect()->route('retards.billet', ['retard' => $retard->id, 'imprimer' => 1]);
     }
