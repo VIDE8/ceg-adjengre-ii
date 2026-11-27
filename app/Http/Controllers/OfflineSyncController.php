@@ -58,34 +58,31 @@ class OfflineSyncController extends Controller
             }
 
             try {
-                $resultat = DB::transaction(function () use ($user, $action, $uuid) {
-                    $r = match (true) {
-                        $action['type'] === 'appel'              => $this->traiterAppel($user, $action['payload']),
-                        $action['type'] === 'note'               => $this->traiterNote($user, $action['payload']),
-                        $action['type'] === 'eleve'              => $this->traiterEleve($user, $action['payload']),
-                        $action['type'] === 'retard'             => $this->traiterRetard($user, $action['payload']),
-                        $action['type'] === 'permission'         => $this->traiterPermission($user, $action['payload']),
-                        $action['type'] === 'permission_retour'  => $this->traiterPermissionRetour($user, $action['payload']),
-                        default                                  => $this->traiterFormulaire($user, $action['type'], $action['payload']),
+                $retour = DB::transaction(function () use ($user, $action, $uuid) {
+                    $retour = match (true) {
+                        $action['type'] === 'appel'             => $this->traiterAppel($user, $action['payload']),
+                        $action['type'] === 'note'              => $this->traiterNote($user, $action['payload']),
+                        $action['type'] === 'eleve'             => $this->traiterEleve($user, $action['payload']),
+                        $action['type'] === 'retard'            => $this->traiterRetard($user, $action['payload']),
+                        $action['type'] === 'permission'        => $this->traiterPermission($user, $action['payload']),
+                        $action['type'] === 'permission_retour' => $this->traiterPermissionRetour($user, $action['payload']),
+                        default                                 => $this->traiterFormulaire($user, $action['type'], $action['payload']),
                     };
-                    $r = is_array($r) ? $r : ['message' => $r];
 
                     // L'uuid est noté dans la même transaction que l'action : jamais l'un sans l'autre
-                    OfflineAction::create([
-                        'uuid'     => $uuid,
-                        'user_id'  => $user->id,
-                        'type'     => $action['type'],
-                        'cible_id' => $r['cible_id'] ?? null,
-                    ]);
+                    OfflineAction::create(['uuid' => $uuid, 'user_id' => $user->id, 'type' => $action['type']]);
 
-                    return $r;
+                    return $retour;
                 });
+
+                // Une action renvoie un texte, ou un texte + des données utiles au téléphone (ex. adresse du billet)
+                $retour = is_array($retour) ? $retour : ['message' => $retour];
 
                 $resultats[] = [
                     'uuid'    => $uuid,
                     'status'  => 'ok',
-                    'message' => $resultat['message'],
-                    'billet'  => $resultat['billet'] ?? null,
+                    'message' => $retour['message'],
+                    'data'    => $retour['data'] ?? null,
                 ];
             } catch (ValidationException $e) {
                 // Refus définitif : on explique pourquoi à l'utilisateur
@@ -151,77 +148,49 @@ class OfflineSyncController extends Controller
         return "Élève inscrit : {$eleve->nom} {$eleve->prenom} (matricule {$eleve->matricule}).";
     }
 
-    // ---------- Surveillant : retards et permissions ----------
-
-    // Rejoue store() du contrôleur : mêmes règles de validation, et on retrouve l'identifiant de la fiche
-    // créée dans l'adresse du billet vers laquelle store() redirige.
-    private function creerFicheSurveillant($user, string $controleur, array $payload): array
-    {
-        abort_unless($user->hasRole('admin') || $user->hasRole('surveillant'), 403, "Seul le surveillant peut faire cette action.");
-
-        $requete = Request::create('/', 'POST', array_map(fn ($v) => $v === '' ? null : $v, $payload));
-        $requete->setUserResolver(fn () => $user);
-
-        $reponse = app($controleur)->store($requete);
-
-        // store() prépare un message pour la page suivante : il ne doit pas s'afficher par erreur plus tard
-        session()->forget(['success', 'error', 'errors']);
-
-        if (!preg_match('#/(retards|permissions)/(\d+)/billet#', (string) $reponse->getTargetUrl(), $m)) {
-            throw new \DomainException("Fiche enregistrée mais son billet est introuvable.");
-        }
-
-        return ['cible_id' => (int) $m[2], 'billet' => "/{$m[1]}/{$m[2]}/billet"];
-    }
-
+    // Retard d'un élève : le billet officiel s'ouvre ensuite à l'adresse renvoyée
     private function traiterRetard($user, array $payload): array
     {
-        $fiche = $this->creerFicheSurveillant($user, RetardController::class, $payload);
-        $eleve = Eleve::find($payload['eleve_id'] ?? 0);
+        abort_unless($user->hasRole('admin') || $user->hasRole('surveillant'), 403, "Seul le surveillant peut enregistrer un retard.");
 
-        return $fiche + [
-            'message' => 'Retard enregistré' . ($eleve ? " : {$eleve->nom} {$eleve->prenom}" : '') . '.',
+        $donnees = Validator::make($payload, RetardController::regles(), RetardController::messages())->validate();
+
+        $retard = app(RetardController::class)->creer($user, $donnees);
+
+        return [
+            'message' => 'Retard enregistré (billet n° ' . $retard->numero . ').',
+            'data'    => ['billet_url' => route('retards.billet', ['retard' => $retard->id], false)],
         ];
     }
 
     private function traiterPermission($user, array $payload): array
     {
-        $fiche = $this->creerFicheSurveillant($user, PermissionController::class, $payload);
-        $eleve = Eleve::find($payload['eleve_id'] ?? 0);
+        abort_unless($user->hasRole('admin') || $user->hasRole('surveillant'), 403, "Seul le surveillant peut accorder une permission.");
 
-        return $fiche + [
-            'message' => 'Permission accordée' . ($eleve ? " : {$eleve->nom} {$eleve->prenom}" : '') . '.',
+        $donnees = Validator::make($payload, PermissionController::regles(), PermissionController::messages())->validate();
+
+        $permission = app(PermissionController::class)->creer($user, $donnees);
+
+        return [
+            'message' => 'Permission accordée (n° ' . $permission->numero . ').',
+            'data'    => ['billet_url' => route('permissions.billet', ['permission' => $permission->id], false)],
         ];
     }
 
-    // L'élève sorti revient : l'heure est celle du téléphone au moment du retour
+    // Retour d'un élève sorti : on garde l'heure réelle du retour, pas l'heure de l'envoi
     private function traiterPermissionRetour($user, array $payload): string
     {
-        abort_unless($user->hasRole('admin') || $user->hasRole('surveillant'), 403, "Seul le surveillant peut faire cette action.");
+        abort_unless($user->hasRole('admin') || $user->hasRole('surveillant'), 403, "Seul le surveillant peut noter un retour.");
 
         $donnees = Validator::make($payload, [
-            'permission_id' => 'nullable|integer',
-            'ref_uuid'      => 'nullable|uuid',
-            'heure'         => 'required|date_format:H:i',
+            'permission_id' => 'required|exists:permissions,id',
+            'heure'         => 'nullable|date_format:H:i',
         ])->validate();
 
-        // Soit une permission déjà sur le serveur, soit une permission créée plus tôt hors ligne (référence par uuid)
-        $id = $donnees['permission_id']
-            ?? OfflineAction::where('uuid', $donnees['ref_uuid'] ?? '')->where('type', 'permission')->value('cible_id');
+        $permission = Permission::findOrFail($donnees['permission_id']);
+        app(PermissionController::class)->enregistrerRetour($permission, $donnees['heure'] ?? null);
 
-        $permission = $id ? Permission::find($id) : null;
-
-        if (!$permission) {
-            throw new \DomainException("Retour non enregistré : la permission correspondante n'a pas été trouvée.");
-        }
-        if ($permission->type !== 'sortie') {
-            throw new \DomainException("Seule une sortie pendant les cours peut avoir un retour.");
-        }
-
-        $permission->heure_retour = $donnees['heure'];
-        $permission->save();
-
-        return 'Retour enregistré à ' . $donnees['heure'] . '.';
+        return 'Retour enregistré à ' . $permission->heure_retour . '.';
     }
 
     // Formulaires simples : on rejoue la méthode store() du contrôleur concerné
