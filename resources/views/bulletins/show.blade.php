@@ -4,6 +4,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="user-id" content="{{ auth()->id() }}">
     <title>Bulletins &ndash; {{ $classe ? $classe->niveau . ' ' . $classe->nom_classe : "Toute l'école" }}</title>
     <style>
         * {
@@ -484,6 +485,7 @@
     @endforeach
     @endforeach
 
+    <script src="/offline-avertir.js"></script>
 </body>
 
 </html>
