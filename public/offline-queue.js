@@ -236,7 +236,11 @@
     zone.style.paddingBottom = '48px';
   }
 
-  // ---------- Formulaires simples du directeur, utilisables sans connexion ----------
+  // ---------- Formulaires utilisables sans connexion ----------
+  // Chaque formulaire reconnu est envoyé dans la file d'attente au lieu d'être posté directement.
+  // Les modifications et suppressions (champ _method) restent en ligne.
+
+  // Formulaires simples du directeur : le serveur rejoue la méthode store() du contrôleur
   var FORMULAIRES = {
     '/trimestres': { type: 'trimestre', nom: 'Trimestre' },
     '/annees-scolaires': { type: 'annee', nom: 'Année scolaire' },
@@ -244,6 +248,21 @@
     '/matieres': { type: 'matiere', nom: 'Matière' },
     '/affectations': { type: 'affectation', nom: 'Affectation' }
   };
+
+  // Formulaires liés à une classe ou à une absence (le numéro vient de l'adresse)
+  var PATRONS = [
+    { re: /^\/classes\/(\d+)\/appel$/, type: 'presence', nom: 'Appel', classe: true, brouillon: true, cle: function () { return aujourdhui(); }, dateDuJour: true },
+    { re: /^\/classes\/(\d+)\/conseil$/, type: 'conseil', nom: 'Conseil de classe', classe: true, brouillon: true, cle: function (form) { return form.elements['trimestre_id'] ? form.elements['trimestre_id'].value : ''; } },
+    { re: /^\/classes\/(\d+)\/comportements$/, type: 'comportement', nom: 'Comportement', classe: true, dateDuJour: true, vider: true },
+    { re: /^\/comportements$/, type: 'comportement_global', nom: 'Comportement', dateDuJour: true, vider: true },
+    { re: /^\/absences-heures\/(\d+)\/justifier$/, type: 'justification', nom: 'Justification', absence: true }
+  ];
+
+  function aujourdhui() {
+    var d = new Date();
+    var p = function (n) { return ('0' + n).slice(-2); };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
 
   function afficherMessage(form, type, texte) {
     var zone = form.parentNode.querySelector('.offline-msg');
@@ -255,51 +274,150 @@
     zone.innerHTML = '<div class="alert alert-' + type + ' small py-2">' + esc(texte) + '</div>';
   }
 
-  async function envoyerFormulaire(form, def) {
+  // Champs du formulaire à plat : { 'decisions[5][observation]': 'texte', ... }
+  function champsPlats(form) {
+    var plat = {};
+    new FormData(form).forEach(function (v, k) {
+      if (k !== '_token' && k !== '_method' && typeof v === 'string') { plat[k] = v; }
+    });
+    return plat;
+  }
+
+  // 'decisions[5][observation]' -> { decisions: { 5: { observation: ... } } }
+  function versImbrique(plat) {
+    var racine = {};
+    Object.keys(plat).forEach(function (nom) {
+      var chemin = nom.replace(/\]/g, '').split('[');
+      var cur = racine;
+      for (var i = 0; i < chemin.length - 1; i++) {
+        if (typeof cur[chemin[i]] !== 'object' || cur[chemin[i]] === null) { cur[chemin[i]] = {}; }
+        cur = cur[chemin[i]];
+      }
+      cur[chemin[chemin.length - 1]] = plat[nom];
+    });
+    return racine;
+  }
+
+  // Quelle définition correspond à ce formulaire ? (null si aucune)
+  function definitionPour(form) {
+    if ((form.method || '').toLowerCase() !== 'post') { return null; }
+    if (form.querySelector('input[name="_method"]')) { return null; }
+    var chemin;
+    try { chemin = new URL(form.action, location.href).pathname.replace(/\/+$/, ''); } catch (e) { return null; }
+
+    var simple = FORMULAIRES[chemin];
+    if (simple) { return { def: simple, forme: 'simple', id: null }; }
+
+    for (var i = 0; i < PATRONS.length; i++) {
+      var m = PATRONS[i].re.exec(chemin);
+      if (m) { return { def: PATRONS[i], forme: 'classe', id: m[1] }; }
+    }
+    return null;
+  }
+
+  function construirePayload(form, cible) {
+    var plat = champsPlats(form);
+    if (cible.forme === 'simple') { return plat; }
+
+    var def = cible.def;
+    var p = { champs: null, plat: plat };
+    if (def.classe) { p.classe_id = cible.id; }
+    if (def.absence) { p.absence_id = cible.id; }
+    if (def.dateDuJour) { plat.date = aujourdhui(); }    // la vraie date du jour, même si l'envoi a lieu plus tard
+    if (def.cle) { p.cle = def.cle(form); }
+    p.champs = versImbrique(plat);
+    return p;
+  }
+
+  function libelle(form, def) {
+    var titre = document.querySelector('h3, h4, h5');
+    var texte = titre ? titre.textContent.replace(/\s+/g, ' ').trim() : '';
+    if (def.absence) {
+      var ligne = form.closest('tr');
+      texte = ligne ? ligne.textContent.replace(/\s+/g, ' ').trim().slice(0, 60) : '';
+    }
+    return def.nom + (texte ? ' : ' + texte.slice(0, 70) : '');
+  }
+
+  async function envoyerFormulaire(form, cible) {
+    var def = cible.def;
     var bouton = form.querySelector('button[type=submit], input[type=submit]');
     var texteBouton = bouton ? bouton.textContent : '';
+    var verrouille = false;
     if (bouton) { bouton.disabled = true; bouton.textContent = 'Enregistrement…'; }
     try {
-      var donnees = {};
-      new FormData(form).forEach(function (v, k) {
-        if (k !== '_token' && k !== '_method' && typeof v === 'string') { donnees[k] = v; }
-      });
-      var resume = Object.keys(donnees).map(function (k) { return donnees[k]; })
-        .filter(Boolean).slice(0, 3).join(' · ');
-      var id = await enqueue(def.type, donnees, def.nom + ' : ' + resume);
+      var payload = construirePayload(form, cible);
+      var resume = cible.forme === 'simple'
+        ? Object.keys(payload).map(function (k) { return payload[k]; }).filter(Boolean).slice(0, 3).join(' · ')
+        : '';
+      var etiquette = cible.forme === 'simple' ? def.nom + ' : ' + resume : libelle(form, def);
+
+      var id = await enqueue(def.type, payload, etiquette);
       var resultats = await flush();
       var r = resultats[id];
 
       if (r && (r.status === 'ok' || r.status === 'duplicate')) {
         afficherMessage(form, 'success', r.message || (def.nom + ' enregistré(e).'));
-        form.reset();
+        if (cible.forme === 'simple' || def.vider) { form.reset(); }
         setTimeout(function () { location.reload(); }, 1200);
       } else if (r && r.status === 'error') {
         await supprimer(id);
         afficherMessage(form, 'danger', r.message);
       } else {
         afficherMessage(form, 'warning', 'Pas de connexion : c\'est gardé sur ce téléphone et sera envoyé automatiquement dès que la connexion reviendra.');
-        form.reset();
+        if (cible.forme === 'simple' || def.vider) { form.reset(); }
+        if (def.absence && bouton) {
+          // La justification est notée : on évite de la renvoyer deux fois par erreur
+          bouton.textContent = 'En attente ⏳';
+          verrouille = true;
+        }
       }
     } catch (e) {
       afficherMessage(form, 'danger', 'Impossible d\'enregistrer : ' + e.message);
     } finally {
-      if (bouton) { bouton.disabled = false; bouton.textContent = texteBouton; }
+      if (bouton && !verrouille) { bouton.disabled = false; bouton.textContent = texteBouton; }
     }
   }
 
   function brancherFormulaires() {
     document.querySelectorAll('form').forEach(function (form) {
-      if ((form.method || '').toLowerCase() !== 'post') { return; }
-      var chemin;
-      try { chemin = new URL(form.action, location.href).pathname.replace(/\/+$/, ''); } catch (e) { return; }
-      var def = FORMULAIRES[chemin];
-      // Les formulaires de modification ou de suppression (_method) restent en ligne
-      if (!def || form.querySelector('input[name="_method"]')) { return; }
+      var cible = definitionPour(form);
+      if (!cible) { return; }
       form.addEventListener('submit', function (ev) {
         ev.preventDefault();
-        envoyerFormulaire(form, def);
+        envoyerFormulaire(form, cible);
       });
+    });
+    restaurerBrouillons();
+  }
+
+  // Une grille (appel, conseil de classe) saisie sans connexion et pas encore envoyée est remise à l'écran :
+  // la copie de la page gardée dans le téléphone peut être plus ancienne.
+  async function restaurerBrouillons() {
+    var items;
+    try { items = (await toutes()).filter(function (i) { return !i.error; }); } catch (e) { return; }
+    if (!items.length) { return; }
+
+    document.querySelectorAll('form').forEach(function (form) {
+      var cible = definitionPour(form);
+      if (!cible || !cible.def.brouillon) { return; }
+
+      var mes = items.filter(function (i) {
+        return i.type === cible.def.type &&
+          String(i.payload.classe_id) === String(cible.id) &&
+          String(i.payload.cle) === String(cible.def.cle(form));
+      });
+      if (!mes.length) { return; }
+
+      var plat = mes[mes.length - 1].payload.plat || {};
+      Array.prototype.forEach.call(form.elements, function (el) {
+        if (!el.name || el.disabled || el.type === 'hidden' || el.type === 'submit' || el.type === 'button') { return; }
+        var present = Object.prototype.hasOwnProperty.call(plat, el.name);
+        if (el.type === 'checkbox') { el.checked = present; }
+        else if (el.type === 'radio') { if (present) { el.checked = plat[el.name] === el.value; } }
+        else if (present) { el.value = plat[el.name]; }
+      });
+      afficherMessage(form, 'warning', 'Une saisie faite sans connexion attend son envoi : elle est affichée ci-dessous.');
     });
   }
 
@@ -355,7 +473,8 @@
     var boite = document.getElementById('offline-etat');
     if (!boite) { return; }
     var attente = 0;
-    try { attente = (await toutes()).filter(function (i) { return !i.error; }).length; } catch (e) {}
+    var enAttenteListe = [];
+    try { enAttenteListe = (await toutes()).filter(function (i) { return !i.error; }); attente = enAttenteListe.length; } catch (e) {}
     var p = etatPages();
     var toutPret = p.total > 0 && p.prets >= p.total;
 
@@ -369,7 +488,9 @@
       '<div class="mb-1"><b>Connexion :</b> ' + (connecte ? 'en ligne' : 'hors ligne') + '</div>' +
       '<div class="mb-1"><b>Pages prêtes sans connexion :</b> ' + p.prets + ' / ' + p.total + '</div>' +
       (p.plusVieux ? '<div class="mb-1"><b>Plus ancienne copie :</b> ' + ilYa(p.plusVieux) + '</div>' : '') +
-      '<div class="mb-2"><b>En attente d\'envoi :</b> ' + attente + '</div>' +
+      '<div class="mb-2"><b>En attente d\'envoi :</b> ' + attente +
+      (attente ? '<ul class="mb-0 ps-3">' + enAttenteListe.slice(0, 8).map(function (i) { return '<li>' + esc(i.label) + '</li>'; }).join('') +
+        (attente > 8 ? '<li>… et ' + (attente - 8) + ' autre(s)</li>' : '') + '</ul>' : '') + '</div>' +
       (preparation ? '<div class="alert alert-info py-1 mb-2">' + esc(preparation) + '</div>' : '') +
       '<div class="d-grid gap-2">' +
       '<button type="button" class="btn btn-sm btn-success" data-offline-action="preparer"' + (!connecte || preparation ? ' disabled' : '') + '>Préparer le mode hors ligne</button>' +

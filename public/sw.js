@@ -1,5 +1,5 @@
-// Service worker - CEG ADJENGRE II (v9)
-const VERSION = 'v9';
+// Service worker - CEG ADJENGRE II (v10)
+const VERSION = 'v10';
 const ASSETS_CACHE = `ceg-assets-${VERSION}`;
 const PAGES_CACHE = `ceg-pages-${VERSION}`;
 const KEEP = [ASSETS_CACHE, PAGES_CACHE];
@@ -8,6 +8,7 @@ const SHELL_ASSETS = [
   '/manifest.json', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png',
   '/offline-queue.js',
   '/offline-surveillant.js',
+  '/offline-avertir.js',
   '/logo.png',
 ];
 // Pages à ne jamais mettre en cache
