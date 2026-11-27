@@ -168,4 +168,20 @@
         });
     });
 </script>
+
+@php
+$ecoleImpression = [
+    'republique'       => config('ecole.republique'),
+    'devise_nationale' => config('ecole.devise_nationale'),
+    'ministere'        => config('ecole.ministere'),
+    'nom'              => config('ecole.nom'),
+    'logo'             => config('ecole.logo') && file_exists(public_path(config('ecole.logo'))) ? '/' . config('ecole.logo') : null,
+    'utilisateur'      => auth()->user()->name,
+];
+@endphp
+<script>
+    // Informations nécessaires pour imprimer un billet sans connexion
+    window.ECOLE = @json($ecoleImpression);
+</script>
+<script src="/offline-surveillant.js"></script>
 @endsection
