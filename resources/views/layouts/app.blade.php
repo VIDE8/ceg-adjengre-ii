@@ -14,7 +14,7 @@
         $pagesHorsLigne = [
             'admin'       => ['/', '/eleves', '/api/eleves?', '/trimestres', '/annees-scolaires', '/matieres', '/affectations', '/retards', '/permissions'],
             'comptable'   => ['/eleves', '/api/eleves?'],
-            'professeur'  => ['/notes', '/appels'],
+            'professeur'  => ['/notes', '/appels', '/ma-classe/appel', '/ma-classe/comportements'],
             'surveillant' => ['/retards', '/permissions'],
         ][$roleHorsLigne] ?? [];
 
