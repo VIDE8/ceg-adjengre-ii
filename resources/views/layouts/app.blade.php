@@ -8,14 +8,36 @@
     <meta name="user-id" content="{{ auth()->id() }}">
     @auth
     @php
+        $roleHorsLigne = auth()->user()->role;
+
+        // Pages gardées automatiquement dans le téléphone (légères)
         $pagesHorsLigne = [
-            'admin'       => ['/', '/eleves', '/api/eleves?', '/trimestres', '/annees-scolaires', '/matieres', '/affectations'],
+            'admin'       => ['/', '/eleves', '/api/eleves?', '/trimestres', '/annees-scolaires', '/matieres', '/affectations', '/retards', '/permissions'],
             'comptable'   => ['/eleves', '/api/eleves?'],
             'professeur'  => ['/notes', '/appels'],
             'surveillant' => ['/retards', '/permissions'],
-        ][auth()->user()->role] ?? [];
+        ][$roleHorsLigne] ?? [];
+
+        // Pages plus lourdes (bulletins, résultats...) : préparées avec le bouton « Préparer le mode hors ligne »
+        $pagesLourdes = [];
+        if (in_array($roleHorsLigne, ['admin', 'professeur'], true)) {
+            $classesHorsLigne = \App\Models\Classe::query()
+                ->when($roleHorsLigne === 'professeur', fn ($q) => $q->where('professeur_id', auth()->id()))
+                ->pluck('id');
+
+            foreach ($classesHorsLigne as $classeId) {
+                foreach (['bulletins', 'recapitulatif', 'absences', 'conseil', 'statistiques', 'comportements', 'appel'] as $page) {
+                    $pagesLourdes[] = "/classes/{$classeId}/{$page}";
+                }
+            }
+
+            if ($roleHorsLigne === 'admin') {
+                array_push($pagesLourdes, '/bulletins', '/statistiques', '/comportements');
+            }
+        }
     @endphp
     <meta name="offline-precache" content="{{ implode('|', $pagesHorsLigne) }}">
+    <meta name="offline-precache-lourd" content="{{ implode('|', $pagesLourdes) }}">
     @endauth
     <title>@yield('title', 'CEG ADJENGRE II')</title>
 
