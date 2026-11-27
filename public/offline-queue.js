@@ -149,7 +149,7 @@
         } else if (r.status === 'error') { await marquerErreur(r.uuid, r.message); }
       }
       // La page ouverte vient de changer côté serveur : on renouvelle sa copie gardée pour le hors ligne
-      if (unOk) { precharger([location.pathname + location.search], true); }
+      if (unOk) { telecharger(location.pathname + location.search); }
     } catch (e) {
       // Pas de réseau : tout reste dans la file, on réessaiera
     }
@@ -157,29 +157,62 @@
     return resultats;
   }
 
-  // Télécharge des pages à l'avance (avec Internet) pour qu'elles s'ouvrent ensuite sans connexion.
-  // Chaque page n'est renouvelée qu'une fois par demi-heure, sauf si on le demande.
-  async function precharger(urls, forcer) {
+  // ---------- Pages gardées pour le hors ligne ----------
+  function lireListe(cle) {
+    try { return JSON.parse(localStorage.getItem(cle) || '[]'); } catch (e) { return []; }
+  }
+
+  function registre() { return lireListe('precache-registre:' + USER_ID); }
+
+  function enregistrerUrls(urls) {
+    var liste = registre();
+    var change = false;
+    urls.forEach(function (u) { if (liste.indexOf(u) < 0) { liste.push(u); change = true; } });
+    if (change) { try { localStorage.setItem('precache-registre:' + USER_ID, JSON.stringify(liste)); } catch (e) {} }
+  }
+
+  function horodatage(url) {
+    try { return parseInt(localStorage.getItem('precache:' + USER_ID + ':' + url) || '0', 10); } catch (e) { return 0; }
+  }
+
+  function urlsMeta(nom) {
+    var m = document.querySelector('meta[name="' + nom + '"]');
+    return m && m.content ? m.content.split('|').filter(Boolean) : [];
+  }
+
+  function sansDoublons(liste) {
+    return liste.filter(function (u, i) { return liste.indexOf(u) === i; });
+  }
+
+  // Télécharge une page pour que le service worker en garde une copie
+  async function telecharger(url) {
+    try {
+      var r = await fetchTimeout(url, {
+        credentials: 'same-origin',
+        headers: { 'X-Precache': '1', 'Accept': 'text/html' }
+      }, 25000);
+      if (r.ok) { try { localStorage.setItem('precache:' + USER_ID + ':' + url, String(Date.now())); } catch (e) {} }
+    } catch (e) { /* tant pis, on réessaiera plus tard */ }
+  }
+
+  // Télécharge des pages à l'avance (avec Internet). Chaque page n'est renouvelée qu'une fois par demi-heure,
+  // sauf si on le demande. « progression » reçoit (faites, total).
+  async function precharger(urls, forcer, progression) {
+    enregistrerUrls(urls);
     try {
       if (!(await enLigne())) { return; }
       for (var i = 0; i < urls.length; i++) {
-        var cle = 'precache:' + USER_ID + ':' + urls[i];
-        var dernier = 0;
-        try { dernier = parseInt(localStorage.getItem(cle) || '0', 10); } catch (e) {}
-        if (!forcer && Date.now() - dernier < 30 * 60 * 1000) { continue; }
-        try {
-          var r = await fetchTimeout(urls[i], {
-            credentials: 'same-origin',
-            headers: { 'X-Precache': '1', 'Accept': 'text/html' }
-          }, 20000);
-          if (r.ok) { try { localStorage.setItem(cle, String(Date.now())); } catch (e) {} }
-        } catch (e) { /* tant pis, on réessaiera plus tard */ }
+        if (forcer || Date.now() - horodatage(urls[i]) >= 30 * 60 * 1000) { await telecharger(urls[i]); }
+        if (progression) { progression(i + 1, urls.length); }
       }
     } catch (e) {}
+    majEtat();
   }
 
   async function majPanneau() {
     window.dispatchEvent(new CustomEvent('offline-queue-change'));
+    majEtat();
+    avertirIncomplet();
     var zone = document.getElementById('offline-panel');
     if (!zone) { return; }
     var items;
@@ -200,6 +233,7 @@
         + '<button type="button" class="btn btn-sm btn-outline-danger" data-supprimer="' + esc(i.uuid) + '">OK</button></div>';
     });
     zone.innerHTML = html;
+    zone.style.paddingBottom = '48px';
   }
 
   // ---------- Formulaires simples du directeur, utilisables sans connexion ----------
@@ -275,6 +309,137 @@
     if (m && m.content) { precharger(m.content.split('|').filter(Boolean)); }
   }
 
+  // ---------- Pastille d'état : connexion, pages prêtes, actions en attente ----------
+  var connecte = true;
+  var preparation = null;   // texte d'avancement pendant la préparation
+
+  function ilYa(t) {
+    var min = Math.round((Date.now() - t) / 60000);
+    if (min < 1) { return 'à l\'instant'; }
+    if (min < 60) { return 'il y a ' + min + ' min'; }
+    var h = Math.round(min / 60);
+    return h < 48 ? 'il y a ' + h + ' h' : 'il y a ' + Math.round(h / 24) + ' j';
+  }
+
+  function toutesLesPages() {
+    return sansDoublons(urlsMeta('offline-precache').concat(registre(), urlsMeta('offline-precache-lourd')));
+  }
+
+  function etatPages() {
+    var liste = toutesLesPages();
+    var prets = 0;
+    var plusVieux = 0;
+    liste.forEach(function (u) {
+      var t = horodatage(u);
+      if (t) { prets++; if (!plusVieux || t < plusVieux) { plusVieux = t; } }
+    });
+    return { total: liste.length, prets: prets, plusVieux: plusVieux };
+  }
+
+  function creerPastille() {
+    if (!USER_ID || document.getElementById('offline-etat')) { return; }
+    var boite = document.createElement('div');
+    boite.id = 'offline-etat';
+    boite.className = 'd-print-none';
+    boite.style.cssText = 'position:fixed;right:8px;bottom:8px;z-index:1075;font-size:12px;width:290px;max-width:calc(100% - 16px)';
+    boite.innerHTML =
+      '<div id="offline-etat-detail" class="card shadow border-0 mb-2" style="display:none"><div class="card-body p-3 small"></div></div>' +
+      '<div class="text-end"><button type="button" id="offline-etat-bouton" class="btn btn-sm btn-dark rounded-pill shadow">' +
+      '<span id="offline-pastille" style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:6px;background:#198754"></span>' +
+      '<span id="offline-etat-texte">En ligne</span></button></div>';
+    document.body.appendChild(boite);
+    majEtat();
+  }
+
+  async function majEtat() {
+    var boite = document.getElementById('offline-etat');
+    if (!boite) { return; }
+    var attente = 0;
+    try { attente = (await toutes()).filter(function (i) { return !i.error; }).length; } catch (e) {}
+    var p = etatPages();
+    var toutPret = p.total > 0 && p.prets >= p.total;
+
+    boite.querySelector('#offline-pastille').style.background = !connecte ? '#6c757d' : (toutPret ? '#198754' : '#fd7e14');
+    boite.querySelector('#offline-etat-texte').textContent =
+      (connecte ? 'En ligne' : 'Hors ligne') + (attente ? ' · ' + attente + ' en attente' : '');
+
+    var detail = boite.querySelector('#offline-etat-detail .card-body');
+    if (document.getElementById('offline-etat-detail').style.display === 'none') { return; }
+    detail.innerHTML =
+      '<div class="mb-1"><b>Connexion :</b> ' + (connecte ? 'en ligne' : 'hors ligne') + '</div>' +
+      '<div class="mb-1"><b>Pages prêtes sans connexion :</b> ' + p.prets + ' / ' + p.total + '</div>' +
+      (p.plusVieux ? '<div class="mb-1"><b>Plus ancienne copie :</b> ' + ilYa(p.plusVieux) + '</div>' : '') +
+      '<div class="mb-2"><b>En attente d\'envoi :</b> ' + attente + '</div>' +
+      (preparation ? '<div class="alert alert-info py-1 mb-2">' + esc(preparation) + '</div>' : '') +
+      '<div class="d-grid gap-2">' +
+      '<button type="button" class="btn btn-sm btn-success" data-offline-action="preparer"' + (!connecte || preparation ? ' disabled' : '') + '>Préparer le mode hors ligne</button>' +
+      (attente ? '<button type="button" class="btn btn-sm btn-outline-primary" data-offline-action="envoyer"' + (!connecte ? ' disabled' : '') + '>Envoyer maintenant</button>' : '') +
+      '<button type="button" class="btn btn-sm btn-outline-secondary" data-offline-action="fermer">Fermer</button></div>' +
+      (!connecte ? '<div class="text-muted mt-2">La préparation demande Internet.</div>' : '');
+  }
+
+  async function preparer() {
+    if (preparation) { return; }
+    preparation = 'Préparation…';
+    majEtat();
+    await precharger(toutesLesPages(), true, function (fait, total) {
+      preparation = 'Préparation : ' + fait + ' / ' + total;
+      majEtat();
+    });
+    preparation = null;
+    majEtat();
+  }
+
+  async function verifierConnexion() {
+    var avant = connecte;
+    connecte = await enLigne();
+    if (connecte !== avant) { majEtat(); if (connecte) { flush(); } }
+  }
+
+  document.addEventListener('click', function (ev) {
+    var cible = ev.target.closest ? ev.target.closest('#offline-etat-bouton, [data-offline-action]') : null;
+    if (!cible) { return; }
+    var detail = document.getElementById('offline-etat-detail');
+    var action = cible.getAttribute('data-offline-action');
+    if (cible.id === 'offline-etat-bouton') {
+      detail.style.display = detail.style.display === 'none' ? '' : 'none';
+      majEtat();
+    } else if (action === 'fermer') {
+      detail.style.display = 'none';
+    } else if (action === 'preparer') {
+      preparer();
+    } else if (action === 'envoyer') {
+      flush();
+    }
+  });
+
+  // ---------- Avertissement sur les pages de résultats ----------
+  var PAGES_CALCULEES = /\/(bulletins|recapitulatif|absences|statistiques|conseil|comportements)(\/|$)/;
+
+  async function avertirIncomplet() {
+    if (!PAGES_CALCULEES.test(location.pathname)) { return; }
+    var items;
+    try { items = (await toutes()).filter(function (i) { return !i.error; }); } catch (e) { return; }
+    var ancien = document.getElementById('offline-avertissement');
+    if (ancien) { ancien.parentNode.removeChild(ancien); }
+    if (!items.length) { return; }
+    if (!document.getElementById('offline-style-impression')) {
+      var st = document.createElement('style');
+      st.id = 'offline-style-impression';
+      st.textContent = '@media print { .offline-avertissement { display: none !important; } }';
+      document.head.appendChild(st);
+    }
+    var d = document.createElement('div');
+    d.id = 'offline-avertissement';
+    d.className = 'alert alert-warning m-2 small offline-avertissement';
+    d.textContent = '⚠ ' + items.length + ' enregistrement(s) saisi(s) sans connexion ne sont pas encore envoyés : ces chiffres peuvent être incomplets. Attendez l\'envoi avant d\'imprimer.';
+    document.body.insertBefore(d, document.body.firstChild);
+  }
+
+  window.addEventListener('offline', function () { connecte = false; majEtat(); });
+  window.addEventListener('online', verifierConnexion);
+  setInterval(function () { if (!document.hidden) { verifierConnexion(); majEtat(); } }, 20000);
+
   document.addEventListener('click', function (ev) {
     var b = ev.target.closest ? ev.target.closest('[data-supprimer]') : null;
     if (b) { supprimer(b.getAttribute('data-supprimer')); }
@@ -287,8 +452,11 @@
     flush();
     brancherFormulaires();
     precacheDeLaPage();
+    creerPastille();
+    verifierConnexion();
+    avertirIncomplet();
   });
   setInterval(flush, 30000);
 
-  window.OfflineQueue = { enqueue: enqueue, flush: flush, enLigne: enLigne, supprimer: supprimer, toutes: toutes, precharger: precharger };
+  window.OfflineQueue = { enqueue: enqueue, flush: flush, enLigne: enLigne, supprimer: supprimer, toutes: toutes, precharger: precharger, preparer: preparer };
 })();
