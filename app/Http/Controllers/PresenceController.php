@@ -29,11 +29,15 @@ class PresenceController extends Controller
         $data = $request->validate([
             'statuts' => 'required|array',
             'statuts.*' => 'in:present,absent,retard',
+            // Date de l'appel : celle du jour où il a été fait (utile quand il est envoyé plus tard, après une coupure)
+            'date' => 'nullable|date|before_or_equal:today',
         ]);
+
+        $date = isset($data['date']) ? \Carbon\Carbon::parse($data['date'])->toDateString() : now()->toDateString();
 
         foreach ($data['statuts'] as $eleveId => $statut) {
             Presence::updateOrCreate(
-                ['eleve_id' => $eleveId, 'date' => now()->toDateString()],
+                ['eleve_id' => $eleveId, 'date' => $date],
                 [
                     'classe_id' => $classe->id,
                     'statut' => $statut,

@@ -3,9 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Http\Controllers\Api\EleveApiController;
+use App\Models\AbsenceHeure;
+use App\Models\Classe;
 use App\Models\Eleve;
 use App\Models\OfflineAction;
 use App\Models\Permission;
+use App\Services\BulletinService;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -36,7 +40,7 @@ class OfflineSyncController extends Controller
     // Reçoit les actions faites sans connexion et les enregistre une par une
     public function sync(Request $request)
     {
-        $types = implode(',', array_merge(['appel', 'note', 'eleve', 'retard', 'permission', 'permission_retour'], array_keys(self::FORMULAIRES)));
+        $types = implode(',', array_merge(['appel', 'note', 'eleve', 'retard', 'permission', 'permission_retour', 'presence', 'conseil', 'comportement', 'comportement_global', 'justification'], array_keys(self::FORMULAIRES)));
 
         $request->validate([
             'actions'           => 'required|array|max:50',
@@ -66,6 +70,8 @@ class OfflineSyncController extends Controller
                         $action['type'] === 'retard'            => $this->traiterRetard($user, $action['payload']),
                         $action['type'] === 'permission'        => $this->traiterPermission($user, $action['payload']),
                         $action['type'] === 'permission_retour' => $this->traiterPermissionRetour($user, $action['payload']),
+                        in_array($action['type'], ['presence', 'conseil', 'comportement', 'comportement_global', 'justification'], true)
+                                                                => $this->traiterFormulaireClasse($user, $action['type'], $action['payload']),
                         default                                 => $this->traiterFormulaire($user, $action['type'], $action['payload']),
                     };
 
@@ -87,6 +93,9 @@ class OfflineSyncController extends Controller
             } catch (ValidationException $e) {
                 // Refus définitif : on explique pourquoi à l'utilisateur
                 $resultats[] = ['uuid' => $uuid, 'status' => 'error', 'message' => collect($e->errors())->flatten()->first()];
+            } catch (ModelNotFoundException $e) {
+                // Classe, élève ou absence supprimé entre-temps : inutile de réessayer
+                $resultats[] = ['uuid' => $uuid, 'status' => 'error', 'message' => "L'élément concerné n'existe plus (classe, élève ou absence supprimé)."];
             } catch (HttpExceptionInterface | \DomainException $e) {
                 $resultats[] = ['uuid' => $uuid, 'status' => 'error', 'message' => $e->getMessage() ?: 'Action refusée.'];
             } catch (\Throwable $e) {
@@ -191,6 +200,51 @@ class OfflineSyncController extends Controller
         app(PermissionController::class)->enregistrerRetour($permission, $donnees['heure'] ?? null);
 
         return 'Retour enregistré à ' . $permission->heure_retour . '.';
+    }
+
+    // Appel du titulaire, conseil de classe, comportements, justification : on rejoue la méthode du contrôleur
+    // concerné. Ses règles de validation et ses droits d'accès (titulaire de la classe...) s'appliquent donc
+    // exactement comme sur le site.
+    private function traiterFormulaireClasse($user, string $type, array $payload): string
+    {
+        $requete = Request::create('/', 'POST', $payload['champs'] ?? []);
+        $requete->setUserResolver(fn () => $user);
+
+        switch ($type) {
+            case 'presence':
+                $classe = Classe::findOrFail($payload['classe_id'] ?? 0);
+                app(PresenceController::class)->enregistrer($requete, $classe);
+                $message = 'Appel de la classe enregistré.';
+                break;
+
+            case 'conseil':
+                $classe = Classe::findOrFail($payload['classe_id'] ?? 0);
+                app(ConseilClasseController::class)->store($requete, $classe, app(BulletinService::class));
+                $message = 'Conseil de classe enregistré.';
+                break;
+
+            case 'comportement':
+                $classe = Classe::findOrFail($payload['classe_id'] ?? 0);
+                app(ComportementController::class)->store($requete, $classe);
+                $message = 'Comportement enregistré.';
+                break;
+
+            case 'comportement_global':
+                abort_unless($user->hasRole('admin'), 403, 'Seul le directeur peut faire cette action.');
+                app(ComportementController::class)->storeGlobal($requete);
+                $message = 'Comportement enregistré.';
+                break;
+
+            default: // justification : on inverse l'état, une seule fois grâce à l'uuid de l'action
+                $absence = AbsenceHeure::findOrFail($payload['absence_id'] ?? 0);
+                app(AppelController::class)->basculerJustification($absence);
+                $message = $absence->fresh()->justifie ? 'Absence justifiée.' : 'Justification retirée.';
+        }
+
+        // Le contrôleur prépare un message pour la page suivante : il ne doit pas s'afficher par erreur plus tard
+        session()->forget(['success', 'error', 'errors']);
+
+        return $message;
     }
 
     // Formulaires simples : on rejoue la méthode store() du contrôleur concerné

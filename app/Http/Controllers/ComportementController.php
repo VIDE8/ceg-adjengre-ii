@@ -30,12 +30,14 @@ class ComportementController extends Controller
             'eleve_id' => 'required|exists:eleves,id',
             'type' => 'required|in:incident,appreciation,sanction',
             'description' => 'required|string|max:1000',
+            // Date réelle de l'événement (utile quand l'enregistrement est envoyé plus tard, après une coupure)
+            'date' => 'nullable|date|before_or_equal:today',
         ]);
 
         Comportement::create([
             'eleve_id' => $data['eleve_id'],
             'classe_id' => $classe->id,
-            'date' => now()->toDateString(),
+            'date' => $data['date'] ?? now()->toDateString(),
             'type' => $data['type'],
             'description' => $data['description'],
             'enregistre_par' => auth()->id(),
@@ -76,6 +78,8 @@ class ComportementController extends Controller
             'eleve_id' => 'required|exists:eleves,id',
             'type' => 'required|in:incident,appreciation,sanction',
             'description' => 'required|string|max:1000',
+            // Date réelle de l'événement (utile quand l'enregistrement est envoyé plus tard, après une coupure)
+            'date' => 'nullable|date|before_or_equal:today',
         ]);
 
         $eleve = Eleve::findOrFail($data['eleve_id']);
@@ -83,7 +87,7 @@ class ComportementController extends Controller
         Comportement::create([
             'eleve_id' => $eleve->id,
             'classe_id' => $eleve->classes_id,
-            'date' => now()->toDateString(),
+            'date' => $data['date'] ?? now()->toDateString(),
             'type' => $data['type'],
             'description' => $data['description'],
             'enregistre_par' => auth()->id(),
