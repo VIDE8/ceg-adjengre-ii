@@ -1,5 +1,5 @@
-// Service worker - CEG ADJENGRE II (v8)
-const VERSION = 'v8';
+// Service worker - CEG ADJENGRE II (v9)
+const VERSION = 'v9';
 const ASSETS_CACHE = `ceg-assets-${VERSION}`;
 const PAGES_CACHE = `ceg-pages-${VERSION}`;
 const KEEP = [ASSETS_CACHE, PAGES_CACHE];
@@ -7,8 +7,13 @@ const KEEP = [ASSETS_CACHE, PAGES_CACHE];
 const SHELL_ASSETS = [
   '/manifest.json', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png',
   '/offline-queue.js',
+  '/offline-surveillant.js',
+  '/logo.png',
 ];
 // Pages à ne jamais mettre en cache
+// Sites externes dont les fichiers (styles, scripts, polices) sont gardés dans le téléphone
+const HOTES_EXTERNES = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
+
 const NEVER_CACHE = ['/login', '/logout', '/api/', '/offline/'];
 
 const OFFLINE_HTML = `<!doctype html><html lang="fr"><head><meta charset="utf-8">
@@ -87,7 +92,8 @@ async function assetStrategy(request) {
   if (cached) return cached;
   try {
     const r = await fetch(request);
-    if (r.ok) cache.put(request, r.clone());
+    // Les fichiers venant d'un autre site (CDN) peuvent être « opaques » : on les garde quand même
+    if (r.ok || r.type === 'opaque') cache.put(request, r.clone());
     return r;
   } catch (e) {
     return Response.error();
@@ -156,6 +162,12 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
 
   const url = new URL(request.url);
+  // Bootstrap, polices et calendrier viennent d'un autre site : on en garde une copie pour le hors ligne
+  if (HOTES_EXTERNES.includes(url.hostname)) {
+    event.respondWith(assetStrategy(request));
+    return;
+  }
+
   if (url.origin !== self.location.origin) return;
 
   if (url.pathname === '/api/eleves') {
